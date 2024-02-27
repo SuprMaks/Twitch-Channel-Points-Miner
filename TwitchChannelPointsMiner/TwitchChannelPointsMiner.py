@@ -53,6 +53,7 @@ class TwitchChannelPointsMiner:
     __slots__ = [
         "username",
         "twitch",
+        "stream_watching_limit",
         "claim_drops_startup",
         "enable_analytics",
         "disable_ssl_cert_verification",
@@ -75,6 +76,7 @@ class TwitchChannelPointsMiner:
         self,
         username: str,
         password: str = None,
+        stream_watching_limit: int = 2,
         claim_drops_startup: bool = False,
         enable_analytics: bool = False,
         disable_ssl_cert_verification: bool = False,
@@ -139,7 +141,8 @@ class TwitchChannelPointsMiner:
         # user_agent = get_user_agent("FIREFOX")
         user_agent = get_user_agent("CHROME")
         self.twitch = Twitch(self.username, user_agent, password)
-
+        # Just in case clamp in range 1 or 2
+        self.stream_watching_limit = max(min(2, stream_watching_limit), 1)
         self.claim_drops_startup = claim_drops_startup
         self.priority = priority if isinstance(priority, list) else [priority]
 
@@ -325,7 +328,7 @@ class TwitchChannelPointsMiner:
 
             self.minute_watcher_thread = threading.Thread(
                 target=self.twitch.send_minute_watched_events,
-                args=(self.streamers, self.priority),
+                args=(self.streamers, self.priority, self.stream_watching_limit),
             )
             self.minute_watcher_thread.name = "Minute watcher"
             self.minute_watcher_thread.start()

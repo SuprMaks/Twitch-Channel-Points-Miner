@@ -376,7 +376,7 @@ class Twitch(object):
             logger.debug(f"Error with update_client_version: {e}")
             return self.client_version
 
-    def send_minute_watched_events(self, streamers, priority, chunk_size=3):
+    def send_minute_watched_events(self, streamers, priority, stream_watching_limit: int = 2, chunk_size=3):
         while self.running:
             try:
                 streamers_index = [
@@ -397,31 +397,26 @@ class Twitch(object):
 
                 streamers_watching = []
                 for prior in priority:
-                    if prior == Priority.ORDER and len(streamers_watching) < 2:
+                    if (length := len(streamers_watching)) >= stream_watching_limit:
+                        break
+
+                    if prior == Priority.ORDER:
                         # Get the first 2 items, they are already in order
-                        streamers_watching += streamers_index[:2]
+                        streamers_watching += streamers_index[:stream_watching_limit - length]
 
                     elif (
                         prior in [Priority.POINTS_ASCENDING,
                                   Priority.POINTS_DESCEDING]
-                        and len(streamers_watching) < 2
                     ):
-                        items = [
-                            {"points": streamers[index].channel_points,
-                                "index": index}
-                            for index in streamers_index
-                        ]
-                        items = sorted(
-                            items,
-                            key=lambda x: x["points"],
+                        streamers_watching += sorted(
+                            streamers_index,
+                            key=lambda x: streamers[x].channel_points,
                             reverse=(
                                 True if prior == Priority.POINTS_DESCEDING else False
                             ),
-                        )
-                        streamers_watching += [item["index"]
-                                               for item in items][:2]
+                        )[:stream_watching_limit - length]
 
-                    elif prior == Priority.STREAK and len(streamers_watching) < 2:
+                    elif prior == Priority.STREAK:
                         """
                         Check if we need need to change priority based on watch streak
                         Viewers receive points for returning for x consecutive streams.
@@ -444,17 +439,17 @@ class Twitch(object):
                                 and streamers[index].stream.minute_watched < 7 # fix #425
                             ):
                                 streamers_watching.append(index)
-                                if len(streamers_watching) == 2:
+                                if len(streamers_watching) == stream_watching_limit:
                                     break
 
-                    elif prior == Priority.DROPS and len(streamers_watching) < 2:
+                    elif prior == Priority.DROPS:
                         for index in streamers_index:
                             if streamers[index].drops_condition() is True:
                                 streamers_watching.append(index)
-                                if len(streamers_watching) == 2:
+                                if len(streamers_watching) == stream_watching_limit:
                                     break
 
-                    elif prior == Priority.SUBSCRIBED and len(streamers_watching) < 2:
+                    elif prior == Priority.SUBSCRIBED:
                         streamers_with_multiplier = [
                             index
                             for index in streamers_index
@@ -466,13 +461,13 @@ class Twitch(object):
                             ),
                             reverse=True,
                         )
-                        streamers_watching += streamers_with_multiplier[:2]
+                        streamers_watching += streamers_with_multiplier[:stream_watching_limit - length]
 
                 """
                 Twitch has a limit - you can't watch more than 2 channels at one time.
                 We take the first two streamers from the list as they have the highest priority (based on order or WatchStreak).
                 """
-                streamers_watching = streamers_watching[:2]
+                streamers_watching = streamers_watching[:stream_watching_limit]
 
                 for index in streamers_watching:
                     next_iteration = time.time() + 60 / len(streamers_watching)
