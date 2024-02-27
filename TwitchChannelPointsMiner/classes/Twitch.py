@@ -19,6 +19,7 @@ from secrets import choice, token_hex
 # from base64 import urlsafe_b64decode
 
 import requests
+from TwitchChannelPointsMiner.retry_requests import get as try_get, post as try_post
 
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
@@ -128,28 +129,34 @@ class Twitch(object):
                     {"event": "minute-watched", "properties": event_properties}
                 ]
 
-    def get_spade_url(self, streamer):
+    @staticmethod
+    def get_spade_url(streamer):
+        # fixes AttributeError: 'NoneType' object has no attribute 'group'
+        # headers = {"User-Agent": self.user_agent}
+        from TwitchChannelPointsMiner.constants import USER_AGENTS
+        headers = {"User-Agent": USER_AGENTS["Linux"]["FIREFOX"]}
+
+        def get_st_url():
+            main_page_request = try_get(
+                streamer.streamer_url, headers=headers, timeout=5)
+            result = re.search("(https://static.twitchcdn.net/config/settings.*?js)",
+                               main_page_request.text).group(1)
+            if result is None:
+                logger.debug("Error with 'get_spade_url': no match 'settings_url'")
+            return result
+
+        def get_spd_url(settings_url):
+            settings_request = try_get(settings_url, headers=headers, timeout=5)
+            streamer.stream.spade_url = re.search('"spade_url":"(.*?)"',
+                                                  settings_request.text).group(1)
+            if streamer.stream.spade_url is None:
+                logger.debug("Error with 'get_spade_url': no match 'spade_url'")
+
         try:
-            # fixes AttributeError: 'NoneType' object has no attribute 'group'
-            # headers = {"User-Agent": self.user_agent}
-            from TwitchChannelPointsMiner.constants import USER_AGENTS
-            headers = {"User-Agent": USER_AGENTS["Linux"]["FIREFOX"]}
-
-            main_page_request = requests.get(
-                streamer.streamer_url, headers=headers)
-            response = main_page_request.text
-            # logger.info(response)
-            regex_settings = "(https://static.twitchcdn.net/config/settings.*?js)"
-            settings_url = re.search(regex_settings, response).group(1)
-
-            settings_request = requests.get(settings_url, headers=headers)
-            response = settings_request.text
-            regex_spade = '"spade_url":"(.*?)"'
-            streamer.stream.spade_url = re.search(
-                regex_spade, response).group(1)
+            get_spd_url(get_st_url())
         except requests.exceptions.RequestException as e:
-            logger.error(
-                f"Something went wrong during extraction of 'spade_url': {e}")
+            logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
+            raise StreamerIsOfflineException
 
     def get_broadcast_id(self, streamer):
         json_data = copy.deepcopy(GQLOperations.WithIsStreamLiveQuery)
@@ -270,7 +277,7 @@ class Twitch(object):
 
     def post_gql_request(self, json_data):
         try:
-            response = requests.post(
+            response = try_post(
                 GQLOperations.url,
                 json=json_data,
                 headers={
@@ -282,6 +289,7 @@ class Twitch(object):
                     "User-Agent": self.user_agent,
                     "X-Device-Id": self.device_id,
                 },
+                timeout=5,
             )
             logger.debug(
                 f"Data: {json_data}, Status code: {response.status_code}, Content: {response.text}"
@@ -351,7 +359,7 @@ class Twitch(object):
 
     def update_client_version(self):
         try:
-            response = requests.get(URL)
+            response = requests.get(URL, timeout=5)
             if response.status_code != 200:
                 logger.debug(
                     f"Error with update_client_version: {response.status_code}"
@@ -365,7 +373,7 @@ class Twitch(object):
             logger.debug(f"Client version: {self.client_version}")
             return self.client_version
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error with update_client_version: {e}")
+            logger.debug(f"Error with update_client_version: {e}")
             return self.client_version
 
     def send_minute_watched_events(self, streamers, priority, chunk_size=3):
