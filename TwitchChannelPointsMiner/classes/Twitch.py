@@ -44,6 +44,7 @@ from TwitchChannelPointsMiner.utils import (
     _millify,
     create_chunks,
     internet_connection_available,
+    at_least_one_value_in_settings_is,
 )
 
 logger = logging.getLogger(__name__)
@@ -198,7 +199,7 @@ class Twitch(object):
             except StreamerIsOfflineException:
                 streamer.set_offline()
 
-    def get_channel_id(self, streamer_username):
+    def get_channel_id(self, streamer_username) -> str:
         json_data = copy.deepcopy(GQLOperations.ReportMenuItem)
         json_data["variables"] = {"channelLogin": streamer_username}
         json_response = self.post_gql_request(json_data)
@@ -211,14 +212,12 @@ class Twitch(object):
         else:
             return json_response["data"]["user"]["id"]
 
-    def get_followers(
-        self, limit: int = 100, order: FollowersOrder = FollowersOrder.ASC
-    ):
+    def get_followers(self, limit: int = 100, order: FollowersOrder = FollowersOrder.ASC) -> dict:
         json_data = copy.deepcopy(GQLOperations.ChannelFollows)
         json_data["variables"] = {"limit": limit, "order": str(order)}
         has_next = True
         last_cursor = ""
-        follows = []
+        follows = {}
         while has_next is True:
             json_data["variables"]["cursor"] = last_cursor
             json_response = self.post_gql_request(json_data)
@@ -226,12 +225,12 @@ class Twitch(object):
                 follows_response = json_response["data"]["user"]["follows"]
                 last_cursor = None
                 for f in follows_response["edges"]:
-                    follows.append(f["node"]["login"].lower())
+                    follows[f["node"]["login"].lower().strip()] = f["node"]["displayName"].strip()
                     last_cursor = f["cursor"]
 
                 has_next = follows_response["pageInfo"]["hasNextPage"]
             except KeyError:
-                return []
+                return {}
         return follows
 
     def update_raid(self, streamer, raid):
@@ -376,162 +375,168 @@ class Twitch(object):
             logger.debug(f"Error with update_client_version: {e}")
             return self.client_version
 
-    def send_minute_watched_events(self, streamers, priority, stream_watching_limit: int = 2, chunk_size=3):
+    def send_minute_watched_events(self, streamers, priority, stream_watching_limit: int = 2, chunk_size=6):
         while self.running:
             try:
-                streamers_index = [
-                    i
-                    for i in range(0, len(streamers))
-                    if streamers[i].is_online is True
-                    and (
-                        streamers[i].online_at == 0
-                        or (time.time() - streamers[i].online_at) > 30
-                    )
-                ]
+                with streamers as streamers_locked:
+                    streamers_index = []
+                    for index, streamer in streamers_locked.items():
+                        if streamer.is_online is True and (streamer.online_at == 0 or (time.time() - streamer.online_at) > 30):
+                            if (streamer.stream.update_elapsed() / 60) > 10:
+                            # Why this user It's currently online but the last updated was more than 10minutes ago?
+                            # Please perform a manually update and check if the user it's online
+                                self.check_streamer_online(streamer)
+                            streamers_index.append(index)
 
-                for index in streamers_index:
-                    if (streamers[index].stream.update_elapsed() / 60) > 10:
-                        # Why this user It's currently online but the last updated was more than 10minutes ago?
-                        # Please perform a manually update and check if the user it's online
-                        self.check_streamer_online(streamers[index])
+                    streamers_watching = []
+                    for prior in priority:
+                        if (length := len(streamers_watching)) >= stream_watching_limit:
+                            break
 
-                streamers_watching = []
-                for prior in priority:
-                    if (length := len(streamers_watching)) >= stream_watching_limit:
-                        break
+                        if prior == Priority.ORDER:
+                            # Get the first 2 items, they are already in order
+                            streamers_watching += streamers_index[:stream_watching_limit - length]
 
-                    if prior == Priority.ORDER:
-                        # Get the first 2 items, they are already in order
-                        streamers_watching += streamers_index[:stream_watching_limit - length]
+                        elif (
+                            prior in [Priority.POINTS_ASCENDING,
+                                      Priority.POINTS_DESCEDING]
+                        ):
+                            streamers_watching += sorted(
+                                streamers_index,
+                                key=lambda x: streamers_locked[x].channel_points,
+                                reverse=(
+                                    True if prior == Priority.POINTS_DESCEDING else False
+                                ),
+                            )[:stream_watching_limit - length]
 
-                    elif (
-                        prior in [Priority.POINTS_ASCENDING,
-                                  Priority.POINTS_DESCEDING]
-                    ):
-                        streamers_watching += sorted(
-                            streamers_index,
-                            key=lambda x: streamers[x].channel_points,
-                            reverse=(
-                                True if prior == Priority.POINTS_DESCEDING else False
-                            ),
-                        )[:stream_watching_limit - length]
-
-                    elif prior == Priority.STREAK:
-                        """
-                        Check if we need need to change priority based on watch streak
-                        Viewers receive points for returning for x consecutive streams.
-                        Each stream must be at least 10 minutes long and it must have been at least 30 minutes since the last stream ended.
-                        Watch at least 6m for get the +10
-                        """
-                        for index in streamers_index:
-                            if (
-                                streamers[index].settings.watch_streak is True
-                                and streamers[index].stream.watch_streak_missing is True
-                                and (
-                                    streamers[index].offline_at == 0
-                                    or (
-                                        (time.time() -
-                                         streamers[index].offline_at)
-                                        // 60
+                        elif prior == Priority.STREAK:
+                            """
+                            Check if we need need to change priority based on watch streak
+                            Viewers receive points for returning for x consecutive streams.
+                            Each stream must be at least 10 minutes long and it must have been at least 30 minutes since the last stream ended.
+                            Watch at least 6m for get the +10
+                            """
+                            for index in streamers_index:
+                                streamer = streamers_locked[index]
+                                if (
+                                        streamer.settings.watch_streak is True
+                                    and streamer.stream.watch_streak_missing is True
+                                    and (
+                                        streamer.offline_at == 0
+                                        or ((time.time() - streamer.offline_at) // 60) > 30
                                     )
-                                    > 30
-                                )
-                                and streamers[index].stream.minute_watched < 7 # fix #425
-                            ):
-                                streamers_watching.append(index)
-                                if len(streamers_watching) == stream_watching_limit:
-                                    break
+                                    and streamer.stream.minute_watched < 7 # fix #425
+                                ):
+                                    streamers_watching.append(index)
+                                    if len(streamers_watching) == stream_watching_limit:
+                                        break
 
-                    elif prior == Priority.DROPS:
-                        for index in streamers_index:
-                            if streamers[index].drops_condition() is True:
-                                streamers_watching.append(index)
-                                if len(streamers_watching) == stream_watching_limit:
-                                    break
+                        elif prior == Priority.DROPS:
+                            for index in streamers_index:
+                                if streamers_locked[index].drops_condition() is True:
+                                    streamers_watching.append(index)
+                                    if len(streamers_watching) == stream_watching_limit:
+                                        break
 
-                    elif prior == Priority.SUBSCRIBED:
-                        streamers_with_multiplier = [
-                            index
-                            for index in streamers_index
-                            if streamers[index].viewer_has_points_multiplier()
-                        ]
-                        streamers_with_multiplier = sorted(
-                            streamers_with_multiplier,
-                            key=lambda x: streamers[x].total_points_multiplier(
-                            ),
-                            reverse=True,
-                        )
-                        streamers_watching += streamers_with_multiplier[:stream_watching_limit - length]
+                        elif prior == Priority.SUBSCRIBED:
+                            streamers_with_multiplier = [
+                                index
+                                for index in streamers_index
+                                if streamers_locked[index].viewer_has_points_multiplier()
+                            ]
+                            streamers_with_multiplier = sorted(
+                                streamers_with_multiplier,
+                                key=lambda x: streamers_locked[x].total_points_multiplier(
+                                ),
+                                reverse=True,
+                            )
+                            streamers_watching += streamers_with_multiplier[:stream_watching_limit - length]
 
-                """
-                Twitch has a limit - you can't watch more than 2 channels at one time.
-                We take the first two streamers from the list as they have the highest priority (based on order or WatchStreak).
-                """
-                streamers_watching = streamers_watching[:stream_watching_limit]
+                    """
+                    Twitch has a limit - you can't watch more than 2 channels at one time.
+                    We take the first two streamers from the list as they have the highest priority
+                    (based on order or WatchStreak).
+                    """
+                    streamers_watching = streamers_watching[:stream_watching_limit]
 
-                for index in streamers_watching:
-                    next_iteration = time.time() + 60 / len(streamers_watching)
+                    cached_payload = {}
+                    for index in streamers_watching:
+                        streamer = streamers_locked[index]
+                        cached_payload[index] = [streamer.stream.spade_url,
+                                                 streamer.stream.encode_payload(),
+                                                 {"User-Agent": self.user_agent},
+                                                 str(streamer)]
+
+                for index, data in cached_payload.items():
+                    period = 60 / len(streamers_watching)
+                    next_iteration = time.time() + period
 
                     try:
                         response = requests.post(
-                            streamers[index].stream.spade_url,
-                            data=streamers[index].stream.encode_payload(),
-                            headers={"User-Agent": self.user_agent},
-                            timeout=60,
+                            data[0],
+                            data=data[1],
+                            headers=data[2],
+                            timeout=period - 1,
                         )
                         logger.debug(
-                            f"Send minute watched request for {streamers[index]} - Status code: {response.status_code}"
+                            f"Send minute watched request for {data[3]} - Status code: {response.status_code}"
                         )
                         if response.status_code == 204:
-                            streamers[index].stream.update_minute_watched()
+                            with streamers as streamers_locked:
+                                if index in streamers_locked:
+                                    streamer = streamers_locked[index]
+                                    streamer.stream.update_minute_watched()
 
-                            """
-                            Remember, you can only earn progress towards a time-based Drop on one participating channel at a time.  [ ! ! ! ]
-                            You can also check your progress towards Drops within a campaign anytime by viewing the Drops Inventory.
-                            For time-based Drops, if you are unable to claim the Drop in time, you will be able to claim it from the inventory page until the Drops campaign ends.
-                            """
+                                    """
+                                    Remember, you can only earn progress towards a time-based Drop on one participating 
+                                    channel at a time.  [ ! ! ! ]
+                                    You can also check your progress towards Drops within a campaign anytime by viewing 
+                                    the Drops Inventory.
+                                    For time-based Drops, if you are unable to claim the Drop in time, you will be able 
+                                    to claim it from the inventory page until the Drops campaign ends.
+                                    """
 
-                            for campaign in streamers[index].stream.campaigns:
-                                for drop in campaign.drops:
-                                    # We could add .has_preconditions_met condition inside is_printable
-                                    if (
-                                        drop.has_preconditions_met is not False
-                                        and drop.is_printable is True
-                                    ):
-                                        drop_messages = [
-                                            f"{streamers[index]} is streaming {streamers[index].stream}",
-                                            f"Campaign: {campaign}",
-                                            f"Drop: {drop}",
-                                            f"{drop.progress_bar()}",
-                                        ]
-                                        for single_line in drop_messages:
-                                            logger.info(
-                                                single_line,
-                                                extra={
-                                                    "event": Events.DROP_STATUS,
-                                                    "skip_telegram": True,
-                                                    "skip_discord": True,
-                                                    "skip_webhook": True,
-                                                    "skip_matrix": True,
-                                                },
-                                            )
+                                    for campaign in streamer.stream.campaigns:
+                                        for drop in campaign.drops:
+                                            # We could add .has_preconditions_met condition inside is_printable
+                                            if (
+                                                drop.has_preconditions_met is not False
+                                                and drop.is_printable is True
+                                            ):
+                                                drop_messages = [
+                                                    f"{streamer} is streaming {streamer.stream}",
+                                                    f"Campaign: {campaign}",
+                                                    f"Drop: {drop}",
+                                                    f"{drop.progress_bar()}",
+                                                ]
+                                                for single_line in drop_messages:
+                                                    logger.info(
+                                                        single_line,
+                                                        extra={
+                                                            "event": Events.DROP_STATUS,
+                                                            "skip_telegram": True,
+                                                            "skip_discord": True,
+                                                            "skip_webhook": True,
+                                                            "skip_matrix": True,
+                                                        },
+                                                    )
 
-                                        if Settings.logger.telegram is not None:
-                                            Settings.logger.telegram.send(
-                                                "\n".join(drop_messages),
-                                                Events.DROP_STATUS,
-                                            )
+                                                if Settings.logger.telegram is not None:
+                                                    Settings.logger.telegram.send(
+                                                        "\n".join(drop_messages),
+                                                        Events.DROP_STATUS,
+                                                    )
 
-                                        if Settings.logger.discord is not None:
-                                            Settings.logger.discord.send(
-                                                "\n".join(drop_messages),
-                                                Events.DROP_STATUS,
-                                            )
-                                        if Settings.logger.webhook is not None:
-                                            Settings.logger.webhook.send(
-                                                "\n".join(drop_messages),
-                                                Events.DROP_STATUS,
-                                            )
+                                                if Settings.logger.discord is not None:
+                                                    Settings.logger.discord.send(
+                                                        "\n".join(drop_messages),
+                                                        Events.DROP_STATUS,
+                                                    )
+                                                if Settings.logger.webhook is not None:
+                                                    Settings.logger.webhook.send(
+                                                        "\n".join(drop_messages),
+                                                        Events.DROP_STATUS,
+                                                    )
 
                     except requests.exceptions.ConnectionError as e:
                         logger.error(
@@ -545,7 +550,7 @@ class Twitch(object):
                         next_iteration - time.time(), chunk_size=chunk_size
                     )
 
-                if streamers_watching == []:
+                if not streamers_watching:
                     self.__chuncked_sleep(60, chunk_size=chunk_size)
             except Exception:
                 logger.error(
@@ -798,65 +803,72 @@ class Twitch(object):
                             drop.is_claimed = self.claim_drop(drop)
                             time.sleep(random.uniform(5, 10))
 
-    def sync_campaigns(self, streamers, chunk_size=3):
+    def sync_campaigns(self, streamers, chunk_size=6):
+        self.__chuncked_sleep(30, 6)
         campaigns_update = 0
         while self.running:
-            try:
-                # Get update from dashboard each 60minutes
-                if (
-                    campaigns_update == 0
-                    # or ((time.time() - campaigns_update) / 60) > 60
+            # If we have at least one streamer with settings = claim_drops True
+            # Spawn a thread for sync inventory and dashboard
+            with streamers as streamers_locked:
+                claim_drops = at_least_one_value_in_settings_is(streamers_locked, "claim_drops", True)
+            if claim_drops:
+                try:
+                    # Get update from dashboard each 60minutes
+                    if (
+                        campaigns_update == 0
+                        # or ((time.time() - campaigns_update) / 60) > 60
 
-                    # TEMPORARY AUTO DROP CLAIMING FIX
-                    # 30 minutes instead of 60 minutes
-                    or ((time.time() - campaigns_update) / 30) > 30
-                    #####################################
-                ):
-                    campaigns_update = time.time()
+                        # TEMPORARY AUTO DROP CLAIMING FIX
+                        # 30 minutes instead of 60 minutes
+                        or ((time.time() - campaigns_update) / 30) > 30
+                        #####################################
+                    ):
+                        campaigns_update = time.time()
 
-                    # TEMPORARY AUTO DROP CLAIMING FIX
-                    self.claim_all_drops_from_inventory()
-                    #####################################
+                        # TEMPORARY AUTO DROP CLAIMING FIX
+                        self.claim_all_drops_from_inventory()
+                        #####################################
 
-                    # Get full details from current ACTIVE campaigns
-                    # Use dashboard so we can explore new drops not currently active in our Inventory
-                    campaigns_details = self.__get_campaigns_details(
-                        self.__get_drops_dashboard(status="ACTIVE")
-                    )
-                    campaigns = []
-
-                    # Going to clear array and structure. Remove all the timeBasedDrops expired or not started yet
-                    for index in range(0, len(campaigns_details)):
-                        if campaigns_details[index] is not None:
-                            campaign = Campaign(campaigns_details[index])
-                            if campaign.dt_match is True:
-                                # Remove all the drops already claimed or with dt not matching
-                                campaign.clear_drops()
-                                if campaign.drops != []:
-                                    campaigns.append(campaign)
-                        else:
-                            continue
-
-                # Divide et impera :)
-                campaigns = self.__sync_campaigns(campaigns)
-
-                # Check if user It's currently streaming the same game present in campaigns_details
-                for i in range(0, len(streamers)):
-                    if streamers[i].drops_condition() is True:
-                        # yes! The streamer[i] have the drops_tags enabled and we It's currently stream a game with campaign active!
-                        # With 'campaigns_ids' we are also sure that this streamer have the campaign active.
-                        # yes! The streamer[index] have the drops_tags enabled and we It's currently stream a game with campaign active!
-                        streamers[i].stream.campaigns = list(
-                            filter(
-                                lambda x: x.drops != []
-                                and x.game == streamers[i].stream.game
-                                and x.id in streamers[i].stream.campaigns_ids,
-                                campaigns,
-                            )
+                        # Get full details from current ACTIVE campaigns
+                        # Use dashboard so we can explore new drops not currently active in our Inventory
+                        campaigns_details = self.__get_campaigns_details(
+                            self.__get_drops_dashboard(status="ACTIVE")
                         )
+                        campaigns = []
 
-            except (ValueError, KeyError, requests.exceptions.ConnectionError) as e:
-                logger.error(f"Error while syncing inventory: {e}")
-                self.__check_connection_handler(chunk_size)
+                        # Going to clear array and structure. Remove all the timeBasedDrops expired or not started yet
+                        for index in range(0, len(campaigns_details)):
+                            if campaigns_details[index] is not None:
+                                campaign = Campaign(campaigns_details[index])
+                                if campaign.dt_match is True:
+                                    # Remove all the drops already claimed or with dt not matching
+                                    campaign.clear_drops()
+                                    if campaign.drops != []:
+                                        campaigns.append(campaign)
+                            else:
+                                continue
+
+                    # Divide et impera :)
+                    campaigns = self.__sync_campaigns(campaigns)
+
+                    # Check if user It's currently streaming the same game present in campaigns_details
+                    with streamers as streamers_locked:
+                        for i, streamer in streamers_locked.items():
+                            if streamer.drops_condition() is True:
+                                # yes! The streamer[i] have the drops_tags enabled and we It's currently stream a game with campaign active!
+                                # With 'campaigns_ids' we are also sure that this streamer have the campaign active.
+                                # yes! The streamer[index] have the drops_tags enabled and we It's currently stream a game with campaign active!
+                                streamer.stream.campaigns = list(
+                                    filter(
+                                        lambda x: x.drops != []
+                                        and x.game == streamer.stream.game
+                                        and x.id in streamer.stream.campaigns_ids,
+                                        campaigns,
+                                    )
+                                )
+
+                except (ValueError, KeyError, requests.exceptions.ConnectionError) as e:
+                    logger.error(f"Error while syncing inventory: {e}")
+                    self.__check_connection_handler(chunk_size)
 
             self.__chuncked_sleep(60, chunk_size=chunk_size)

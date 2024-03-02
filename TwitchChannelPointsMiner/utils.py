@@ -16,7 +16,7 @@ from TwitchChannelPointsMiner.constants import USER_AGENTS, GITHUB_url
 def _millify(input, precision=2):
     return millify(input, precision)
 
-
+"""
 def get_streamer_index(streamers: list, channel_id) -> int:
     try:
         return next(
@@ -24,6 +24,7 @@ def get_streamer_index(streamers: list, channel_id) -> int:
         )
     except StopIteration:
         return -1
+"""
 
 
 def float_round(number, ndigits=2):
@@ -110,9 +111,9 @@ def remove_emoji(string: str) -> str:
     return emoji_pattern.sub(r"", string)
 
 
-def at_least_one_value_in_settings_is(items, attr, value=True):
+def at_least_one_value_in_settings_is(items, attr, value=True) -> bool:
     for item in items:
-        if getattr(item.settings, attr) == value:
+        if getattr(items[item].settings, attr) == value:
             return True
     return False
 

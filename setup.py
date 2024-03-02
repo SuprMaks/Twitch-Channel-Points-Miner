@@ -37,7 +37,9 @@ setuptools.setup(
         "flask",
         "irc",
         "pandas",
-        "pytz"
+        "pytz",
+        "locked-dict"
+        "plum-dispatch"
     ],
     long_description=read("README.md"),
     long_description_content_type="text/markdown",

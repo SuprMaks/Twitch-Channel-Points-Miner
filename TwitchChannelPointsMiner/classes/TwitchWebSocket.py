@@ -39,12 +39,18 @@ class TwitchWebSocket(WebSocketApp):
     #     self.forced_close = True
     #     super().close()
 
-    def listen(self, topic, auth_token=None):
+    def __request(self, type: str, topic, auth_token=None):
         data = {"topics": [str(topic)]}
         if topic.is_user_topic() and auth_token is not None:
             data["auth_token"] = auth_token
         nonce = create_nonce()
-        self.send({"type": "LISTEN", "nonce": nonce, "data": data})
+        self.send({"type": type.upper(), "nonce": nonce, "data": data})
+
+    def listen(self, topic, auth_token=None):
+        self.__request('LISTEN', topic, auth_token)
+
+    def unlisten(self, topic, auth_token=None):
+        self.__request('UNLISTEN', topic, auth_token)
 
     def ping(self):
         self.send({"type": "PING"})

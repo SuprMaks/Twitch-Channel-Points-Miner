@@ -10,3 +10,5 @@ flask
 irc
 pandas
 pytz
+locked-dict
+plum-dispatch

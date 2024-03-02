@@ -4,6 +4,8 @@ import os
 import time
 from datetime import datetime
 from threading import Lock
+from plum import dispatch
+from typing import Union
 
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, DelayMode
@@ -65,13 +67,15 @@ class StreamerSettings(object):
 
 class Streamer(object):
     __slots__ = [
-        "username",
-        "channel_id",
+        "_username",
+        "_channel_id",
+        "_display_name",
         "settings",
         "is_online",
         "stream_up",
         "online_at",
         "offline_at",
+        "start_channel_points",
         "channel_points",
         "minute_watched_requests",
         "viewer_is_mod",
@@ -80,19 +84,21 @@ class Streamer(object):
         "stream",
         "raid",
         "history",
-        "streamer_url",
-        "mutex",
+        "_lock",
     ]
 
-    def __init__(self, username, settings=None):
-        self.username: str = username.lower().strip()
-        self.channel_id: str = ""
+    @dispatch
+    def __init__(self, username: str, settings: StreamerSettings = StreamerSettings()):
+        self._username: str = username.lower().strip()
+        self._display_name: str = ''
+        self._channel_id: int = 0
         self.settings = settings
         self.is_online = False
         self.stream_up = 0
         self.online_at = 0
         self.offline_at = 0
-        self.channel_points = 0
+        self.start_channel_points: int = 0
+        self.channel_points: int = 0
         self.minute_watched_requests = None
         self.viewer_is_mod = False
         self.activeMultipliers = None
@@ -103,19 +109,81 @@ class Streamer(object):
         self.raid = None
         self.history = {}
 
-        self.streamer_url = f"{URL}/{self.username}"
+        self._lock = Lock()
 
-        self.mutex = Lock()
+    @dispatch
+    def __init__(self, username: str, display_name: str, settings: StreamerSettings = StreamerSettings()):
+        self.__init__(username, settings)
+        self.display_name = display_name
+
+    def __enter__(self):
+        """Context manager enter the block, acquire the lock."""
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit the block, release the lock."""
+        self._lock.release()
+
+    def __getstate__(self):
+        """Enable Pickling inside context blocks,
+        through inclusion of the slot entries without the lock."""
+        return dict(
+            (slot, getattr(self, slot))
+            for slot in self.__slots__
+            if hasattr(self, slot) and slot != '_lock'
+        )
+
+    def __setstate__(self, state):
+        """Restore the instance from pickle including the slot entries,
+        without addition of a fresh lock.
+        """
+        for slot, value in getattr(state, 'items')():
+            setattr(self, slot, value)
+        self._lock = Lock()
 
     def __repr__(self):
-        return f"Streamer(username={self.username}, channel_id={self.channel_id}, channel_points={_millify(self.channel_points)})"
+        return f"Streamer(username={self._username}, channel_id={self._channel_id}, channel_points={_millify(self.channel_points)})"
 
     def __str__(self):
+        display_name = self.display_name
+        if self.username != display_name.lower():
+            display_name = f"{self.display_name}({self.username})"
         return (
-            f"{self.username} ({_millify(self.channel_points)} points)"
+            f"{display_name} ({_millify(self.channel_points)} points)"
             if Settings.logger.less
             else self.__repr__()
         )
+
+    @property
+    def username(self) -> str:
+        return self._username
+
+    @username.setter
+    def username(self, data: str):
+        self._username = data.lower().strip()
+
+    @property
+    def display_name(self) -> str:
+        if self._display_name:
+            return self._display_name
+        return self.username
+
+    @display_name.setter
+    def display_name(self, data: str):
+        self._display_name = data.strip()
+
+    @property
+    def channel_id(self) -> str:
+        return str(self._channel_id)
+
+    @channel_id.setter
+    def channel_id(self, data: Union[str, int]):
+        self._channel_id = int(data)
+
+    @property
+    def streamer_url(self):
+        return f"{URL}/{self.username}"
 
     def set_offline(self):
         if self.is_online is True:
@@ -238,7 +306,7 @@ class Streamer(object):
         fname = os.path.join(Settings.analytics_path, f"{self.username}.json")
         temp_fname = fname + '.temp'  # Temporary file name
 
-        with self.mutex:
+        with self:
             # Create and write to the temporary file
             with open(temp_fname, "w") as temp_file:
                 json_data = json.load(

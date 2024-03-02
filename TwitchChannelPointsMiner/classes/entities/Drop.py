@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from dateutil import parser
 
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.utils import percentage
@@ -38,9 +39,9 @@ class Drop(object):
         self.is_printable = False
         self.percentage_progress = 0
 
-        self.end_at = datetime.strptime(dict["endAt"], "%Y-%m-%dT%H:%M:%SZ")
-        self.start_at = datetime.strptime(dict["startAt"], "%Y-%m-%dT%H:%M:%SZ")
-        self.dt_match = self.start_at < datetime.now() < self.end_at
+        self.end_at = parser.isoparse(dict["endAt"])
+        self.start_at = parser.isoparse(dict["startAt"])
+        self.dt_match = self.start_at < datetime.now(timezone.utc) < self.end_at
 
     def update(
         self,

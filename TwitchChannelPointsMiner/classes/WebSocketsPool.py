@@ -14,10 +14,7 @@ from TwitchChannelPointsMiner.classes.entities.Raid import Raid
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
 from TwitchChannelPointsMiner.constants import WEBSOCKET
-from TwitchChannelPointsMiner.utils import (
-    get_streamer_index,
-    internet_connection_available,
-)
+from TwitchChannelPointsMiner.utils import internet_connection_available
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +52,17 @@ class WebSocketsPool:
             self.ws[index].pending_topics.append(topic)
         else:
             self.ws[index].listen(topic, self.twitch.twitch_login.get_auth_token())
+
+    def unsubscribe(self, topic):
+        for index, ws in enumerate(self.ws):
+            if ws.is_opened is False:
+                if topic in ws.pending_topics:
+                    self.ws[index].pending_topics.remove(topic)
+            else:
+                self.ws[index].unlisten(topic, self.twitch.twitch_login.get_auth_token())
+
+            if topic in ws.topics:
+                self.ws[index].topics.remove(topic)
 
     def __new(self, index):
         return TwitchWebSocket(
@@ -95,15 +103,21 @@ class WebSocketsPool:
             ws.is_opened = True
             ws.ping()
 
-            for topic in ws.pending_topics:
+            while ws.pending_topics:
+                topic = ws.pending_topics.pop(0)
                 ws.listen(topic, ws.twitch.twitch_login.get_auth_token())
+                if topic not in ws.topics:
+                    ws.topics.append(topic)
 
             while ws.is_closed is False:
                 # Else: the ws is currently in reconnecting phase, you can't do ping or other operation.
                 # Probably this ws will be closed very soon with ws.is_closed = True
                 if ws.is_reconnecting is False:
                     ws.ping()  # We need ping for keep the connection alive
-                    time.sleep(random.uniform(25, 30))
+                    for _ in range(1, int(random.uniform(25, 30) // 5)):
+                        if ws.is_closed:
+                            break
+                        time.sleep(5)
 
                     if ws.elapsed_last_pong() > 5:
                         logger.info(
@@ -186,16 +200,17 @@ class WebSocketsPool:
             ws.last_message_timestamp = message.timestamp
             ws.last_message_type_channel = message.identifier
 
-            streamer_index = get_streamer_index(ws.streamers, message.channel_id)
-            if streamer_index != -1:
+            streamer_index = int(message.channel_id)
+            if streamer_index in ws.streamers:
+                streamer = ws.streamers[streamer_index]
                 try:
                     if message.topic == "community-points-user-v1":
                         if message.type in ["points-earned", "points-spent"]:
                             balance = message.data["balance"]["balance"]
-                            ws.streamers[streamer_index].channel_points = balance
+                            streamer.channel_points = balance
                             # Analytics switch
                             if Settings.enable_analytics is True:
-                                ws.streamers[streamer_index].persistent_series(
+                                streamer.persistent_series(
                                     event_type=message.data["point_gain"]["reason_code"]
                                     if message.type == "points-earned"
                                     else "Spent"
@@ -206,37 +221,37 @@ class WebSocketsPool:
                             reason_code = message.data["point_gain"]["reason_code"]
 
                             logger.info(
-                                f"+{earned} → {ws.streamers[streamer_index]} - Reason: {reason_code}.",
+                                f"+{earned} → {streamer} - Reason: {reason_code}.",
                                 extra={
                                     "emoji": ":rocket:",
                                     "event": Events.get(f"GAIN_FOR_{reason_code}"),
                                 },
                             )
-                            ws.streamers[streamer_index].update_history(
+                            streamer.update_history(
                                 reason_code, earned
                             )
                             # Analytics switch
                             if Settings.enable_analytics is True:
-                                ws.streamers[streamer_index].persistent_annotations(
+                                streamer.persistent_annotations(
                                     reason_code, f"+{earned} - {reason_code}"
                                 )
                         elif message.type == "claim-available":
                             ws.twitch.claim_bonus(
-                                ws.streamers[streamer_index],
+                                streamer,
                                 message.data["claim"]["id"],
                             )
 
                     elif message.topic == "video-playback-by-id":
                         # There is stream-up message type, but it's sent earlier than the API updates
                         if message.type == "stream-up":
-                            ws.streamers[streamer_index].stream_up = time.time()
+                            streamer.stream_up = time.time()
                         elif message.type == "stream-down":
-                            if ws.streamers[streamer_index].is_online is True:
-                                ws.streamers[streamer_index].set_offline()
+                            if streamer.is_online is True:
+                                streamer.set_offline()
                         elif message.type == "viewcount":
-                            if ws.streamers[streamer_index].stream_up_elapsed():
+                            if streamer.stream_up_elapsed():
                                 ws.twitch.check_streamer_online(
-                                    ws.streamers[streamer_index]
+                                    streamer
                                 )
 
                     elif message.topic == "raid":
@@ -245,12 +260,12 @@ class WebSocketsPool:
                                 message.message["raid"]["id"],
                                 message.message["raid"]["target_login"],
                             )
-                            ws.twitch.update_raid(ws.streamers[streamer_index], raid)
+                            ws.twitch.update_raid(streamer, raid)
 
                     elif message.topic == "community-moments-channel-v1":
                         if message.type == "active":
                             ws.twitch.claim_moment(
-                                ws.streamers[streamer_index], message.data["moment_id"]
+                                streamer, message.data["moment_id"]
                             )
 
                     elif message.topic == "predictions-channel-v1":
@@ -270,11 +285,9 @@ class WebSocketsPool:
                                     event_dict["prediction_window_seconds"]
                                 )
                                 # Reduce prediction window by 3/6s - Collect more accurate data for decision
-                                prediction_window_seconds = ws.streamers[
-                                    streamer_index
-                                ].get_prediction_window(prediction_window_seconds)
+                                prediction_window_seconds = streamer.get_prediction_window(prediction_window_seconds)
                                 event = EventPrediction(
-                                    ws.streamers[streamer_index],
+                                    streamer,
                                     event_id,
                                     event_dict["title"],
                                     parser.parse(event_dict["created_at"]),
@@ -283,10 +296,9 @@ class WebSocketsPool:
                                     event_dict["outcomes"],
                                 )
                                 if (
-                                    ws.streamers[streamer_index].is_online
+                                    streamer.is_online
                                     and event.closing_bet_after(current_tmsp) > 0
                                 ):
-                                    streamer = ws.streamers[streamer_index]
                                     bet_settings = streamer.settings.bet
                                     if (
                                         bet_settings.minimum_points is None
@@ -364,19 +376,19 @@ class WebSocketsPool:
                                     },
                                 )
 
-                                ws.streamers[streamer_index].update_history(
+                                streamer.update_history(
                                     "PREDICTION", points["gained"]
                                 )
 
                                 # Remove duplicate history records from previous message sent in community-points-user-v1
                                 if event_prediction.result["type"] == "REFUND":
-                                    ws.streamers[streamer_index].update_history(
+                                    streamer.update_history(
                                         "REFUND",
                                         -points["placed"],
                                         counter=-1,
                                     )
                                 elif event_prediction.result["type"] == "WIN":
-                                    ws.streamers[streamer_index].update_history(
+                                    streamer.update_history(
                                         "PREDICTION",
                                         -points["won"],
                                         counter=-1,
@@ -385,9 +397,7 @@ class WebSocketsPool:
                                 if event_prediction.result["type"]:
                                     # Analytics switch
                                     if Settings.enable_analytics is True:
-                                        ws.streamers[
-                                            streamer_index
-                                        ].persistent_annotations(
+                                        streamer.persistent_annotations(
                                             event_prediction.result["type"],
                                             f"{ws.events_predictions[event_id].title}",
                                         )
@@ -395,7 +405,7 @@ class WebSocketsPool:
                                 event_prediction.bet_confirmed = True
                                 # Analytics switch
                                 if Settings.enable_analytics is True:
-                                    ws.streamers[streamer_index].persistent_annotations(
+                                    streamer.persistent_annotations(
                                         "PREDICTION_MADE",
                                         f"Decision: {event_prediction.bet.decision['choice']} - {event_prediction.title}",
                                     )
