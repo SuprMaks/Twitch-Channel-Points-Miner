@@ -294,6 +294,7 @@ class TwitchChannelPointsMiner:
                             f"{streamer} is removed from mining list!",
                             extra={
                                 "emoji": ":sleeping:",
+                                "links": {streamer.printable_display_name: streamer.streamer_url}
                             },
                         )
 
@@ -348,23 +349,31 @@ class TwitchChannelPointsMiner:
                         channel_id = int(streamer.channel_id)
                         # Restore history and start points
                         if channel_id in self._streamers_archive:
-                            logger.info(
-                                f"Restore data for {username}...",
-                                extra={"emoji": ":nerd_face:"},
-                            )
-
                             streamer = copy.deepcopy(self._streamers_archive[channel_id])
+                            logger.info(
+                                f"Restoring data for {streamer.printable_display_name}...",
+                                extra={
+                                    "emoji": ":nerd_face:",
+                                    "links": {streamer.printable_display_name: streamer.streamer_url}
+                                },
+                            )
 
                             if streamer.username != username:
                                 logger.info(
                                     f"New username {streamer.username} → {username}...",
-                                    extra={"emoji": ":nerd_face:"},
+                                    extra={
+                                        "emoji": ":nerd_face:",
+                                    },
                                 )
                                 streamer.username = username
                             if val and isinstance(val, str) and streamer.display_name != val:
                                 logger.info(
                                     f"New display_name {streamer.display_name} → {val}...",
-                                    extra={"emoji": ":nerd_face:"},
+                                    extra={
+                                        "emoji": ":nerd_face:",
+                                        "links": {streamer.display_name: streamer.streamer_url,
+                                                  val: streamer.streamer_url}
+                                    },
                                 )
                                 streamer.display_name = val
 
@@ -449,7 +458,7 @@ class TwitchChannelPointsMiner:
                     if self._running is False:
                         break
 
-                    if streamer.is_online:
+                    if streamer.online:
                         self.twitch.load_channel_points_context(streamer)
 
     def run(
@@ -583,7 +592,10 @@ class TwitchChannelPointsMiner:
                         )
                     logger.info(
                         f"{event.print_recap()}",
-                        extra={"emoji": ":bar_chart:"},
+                        extra={
+                            "emoji": ":bar_chart:",
+                            "links": {event.streamer.printable_display_name: event.streamer.streamer_url}
+                        },
                     )
 
         def print_total(streamer: Streamer):
@@ -591,7 +603,10 @@ class TwitchChannelPointsMiner:
                 logger.info(
                     f"{repr(streamer)}, Total Points Gained (after farming - before farming): "
                     f"{_millify((streamer.channel_points - streamer.start_channel_points))}",
-                    extra={"emoji": ":robot:"},
+                    extra={
+                        "emoji": ":robot:",
+                        "links": {streamer.username: streamer.streamer_url}
+                    },
                 )
                 if streamer.history != {}:
                     logger.info(

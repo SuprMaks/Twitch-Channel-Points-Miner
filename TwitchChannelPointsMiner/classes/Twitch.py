@@ -46,6 +46,7 @@ from TwitchChannelPointsMiner.utils import (
     internet_connection_available,
     at_least_one_value_in_settings_is,
 )
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 
 logger = logging.getLogger(__name__)
 
@@ -185,19 +186,19 @@ class Twitch(object):
         if time.time() < streamer.offline_at + 60:
             return
 
-        if streamer.is_online is False:
+        if not streamer.online:
             try:
                 self.get_spade_url(streamer)
                 self.update_stream(streamer)
             except StreamerIsOfflineException:
-                streamer.set_offline()
+                streamer.online = False
             else:
-                streamer.set_online()
+                streamer.online = True
         else:
             try:
                 self.update_stream(streamer)
             except StreamerIsOfflineException:
-                streamer.set_offline()
+                streamer.online = False
 
     def get_channel_id(self, streamer_username) -> str:
         json_data = copy.deepcopy(GQLOperations.ReportMenuItem)
@@ -243,7 +244,12 @@ class Twitch(object):
             logger.info(
                 f"Joining raid from {streamer} to {raid.target_login}!",
                 extra={"emoji": ":performing_arts:",
-                       "event": Events.JOIN_RAID},
+                       "event": Events.JOIN_RAID,
+                       "links": {
+                           streamer.printable_display_name: streamer.streamer_url,
+                           raid.target_login: Streamer(raid.target_login).streamer_url
+                       }
+                       },
             )
 
     def viewer_is_mod(self, streamer):
@@ -381,7 +387,7 @@ class Twitch(object):
                 with streamers as streamers_locked:
                     streamers_index = []
                     for index, streamer in streamers_locked.items():
-                        if streamer.is_online is True and (streamer.online_at == 0 or (time.time() - streamer.online_at) > 30):
+                        if streamer.online and (streamer.online_at == 0 or (time.time() - streamer.online_at) > 30):
                             if (streamer.stream.update_elapsed() / 60) > 10:
                             # Why this user It's currently online but the last updated was more than 10minutes ago?
                             # Please perform a manually update and check if the user it's online
@@ -584,6 +590,7 @@ class Twitch(object):
             extra={
                 "emoji": ":four_leaf_clover:",
                 "event": Events.BET_GENERAL,
+                "links": {event.streamer.printable_display_name: event.streamer.streamer_url}
             },
         )
         if event.status == "ACTIVE":
@@ -594,6 +601,7 @@ class Twitch(object):
                     extra={
                         "emoji": ":pushpin:",
                         "event": Events.BET_FILTERS,
+                        "links": {event.streamer.printable_display_name: event.streamer.streamer_url}
                     },
                 )
                 logger.info(

@@ -71,7 +71,7 @@ class Streamer(object):
         "_channel_id",
         "_display_name",
         "settings",
-        "is_online",
+        "_online",
         "stream_up",
         "online_at",
         "offline_at",
@@ -93,7 +93,7 @@ class Streamer(object):
         self._display_name: str = ''
         self._channel_id: int = 0
         self.settings = settings
-        self.is_online = False
+        self._online = False
         self.stream_up = 0
         self.online_at = 0
         self.offline_at = 0
@@ -143,17 +143,24 @@ class Streamer(object):
         self._lock = Lock()
 
     def __repr__(self):
-        return f"Streamer(username={self._username}, channel_id={self._channel_id}, channel_points={_millify(self.channel_points)})"
+        return f"Streamer(username={self.username}, channel_id={self.channel_id}, channel_points={_millify(self.channel_points)})"
 
     def __str__(self):
-        display_name = self.display_name
-        if self.username != display_name.lower():
-            display_name = f"{self.display_name}({self.username})"
+        # display_name = self.display_name
+        # if self.username != display_name.lower():
+        #     display_name = f"{self.display_name}({self.username})"
         return (
-            f"{display_name} ({_millify(self.channel_points)} points)"
+            f"{self.printable_display_name} ({_millify(self.channel_points)} points)"
             if Settings.logger.less
             else self.__repr__()
         )
+
+    @property
+    def printable_display_name(self) -> str:
+        display_name = self.display_name
+        if self.username != display_name.lower():
+            display_name = f"{self.display_name}({self.username})"
+        return display_name
 
     @property
     def username(self) -> str:
@@ -185,34 +192,29 @@ class Streamer(object):
     def streamer_url(self):
         return f"{URL}/{self.username}"
 
-    def set_offline(self):
-        if self.is_online is True:
-            self.offline_at = time.time()
-            self.is_online = False
+    @property
+    def online(self) -> bool:
+        return self._online
+
+    @online.setter
+    def online(self, d: bool):
+        if d is not self._online:
+            if d:
+                self.online_at = time.time()
+                self.stream.init_watch_streak()
+            else:
+                self.offline_at = time.time()
+
+            self._online = d
 
         self.toggle_chat()
 
         logger.info(
-            f"{self} is Offline!",
+            f"{self} is {'Online' if self._online else 'Offline'}!",
             extra={
-                "emoji": ":sleeping:",
-                "event": Events.STREAMER_OFFLINE,
-            },
-        )
-
-    def set_online(self):
-        if self.is_online is False:
-            self.online_at = time.time()
-            self.is_online = True
-            self.stream.init_watch_streak()
-
-        self.toggle_chat()
-
-        logger.info(
-            f"{self} is Online!",
-            extra={
-                "emoji": ":partying_face:",
-                "event": Events.STREAMER_ONLINE,
+                "emoji": ":partying_face:" if self._online else ":sleeping:",
+                "event": Events.STREAMER_ONLINE if self._online else Events.STREAMER_OFFLINE,
+                "links": {self.printable_display_name: self.streamer_url}
             },
         )
 
@@ -239,8 +241,8 @@ class Streamer(object):
 
     def drops_condition(self):
         return (
-            self.settings.claim_drops is True
-            and self.is_online is True
+            self.settings.claim_drops
+            and self.online
             # and self.stream.drops_tags is True
             and self.stream.campaigns_ids != []
         )
@@ -340,7 +342,7 @@ class Streamer(object):
         if self.settings.chat == ChatPresence.ALWAYS:
             self.__join_chat()
         elif self.settings.chat != ChatPresence.NEVER:
-            if self.is_online is True:
+            if self.online:
                 if self.settings.chat == ChatPresence.ONLINE:
                     self.__join_chat()
                 elif self.settings.chat == ChatPresence.OFFLINE:

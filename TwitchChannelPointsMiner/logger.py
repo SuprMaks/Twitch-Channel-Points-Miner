@@ -72,6 +72,7 @@ class LoggerSettings:
         "file_level",
         "emoji",
         "colored",
+        "hyperlinks",
         "color_palette",
         "auto_clear",
         "telegram",
@@ -92,6 +93,7 @@ class LoggerSettings:
         file_level: int = logging.DEBUG,
         emoji: bool = platform.system() != "Windows",
         colored: bool = False,
+        hyperlinks: bool = True,
         color_palette: ColorPalette = ColorPalette(),
         auto_clear: bool = True,
         telegram: Telegram or None = None,
@@ -109,6 +111,7 @@ class LoggerSettings:
         self.file_level = file_level
         self.emoji = emoji
         self.colored = colored
+        self.hyperlinks = hyperlinks
         self.color_palette = color_palette
         self.auto_clear = auto_clear
         self.telegram = telegram
@@ -197,6 +200,10 @@ class GlobalFormatter(logging.Formatter):
                 record.msg = (
                     f"{self.settings.color_palette.get(record.event)}{record.msg}"
                 )
+
+        if self.settings.hyperlinks and hasattr(record, "links"):
+            for txt, link in getattr(record, 'links').items():
+                record.msg = record.msg.replace(txt, '\033]8;{};{}\033\\{}\033]8;;\033\\'.format('', link, txt))
 
         return super().format(record)
 

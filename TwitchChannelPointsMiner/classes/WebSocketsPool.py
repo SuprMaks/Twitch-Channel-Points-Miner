@@ -209,7 +209,7 @@ class WebSocketsPool:
                             balance = message.data["balance"]["balance"]
                             streamer.channel_points = balance
                             # Analytics switch
-                            if Settings.enable_analytics is True:
+                            if Settings.enable_analytics:
                                 streamer.persistent_series(
                                     event_type=message.data["point_gain"]["reason_code"]
                                     if message.type == "points-earned"
@@ -225,13 +225,14 @@ class WebSocketsPool:
                                 extra={
                                     "emoji": ":rocket:",
                                     "event": Events.get(f"GAIN_FOR_{reason_code}"),
+                                    "links": {streamer.printable_display_name: streamer.streamer_url}
                                 },
                             )
                             streamer.update_history(
                                 reason_code, earned
                             )
                             # Analytics switch
-                            if Settings.enable_analytics is True:
+                            if Settings.enable_analytics:
                                 streamer.persistent_annotations(
                                     reason_code, f"+{earned} - {reason_code}"
                                 )
@@ -246,8 +247,7 @@ class WebSocketsPool:
                         if message.type == "stream-up":
                             streamer.stream_up = time.time()
                         elif message.type == "stream-down":
-                            if streamer.is_online is True:
-                                streamer.set_offline()
+                            streamer.online = False
                         elif message.type == "viewcount":
                             if streamer.stream_up_elapsed():
                                 ws.twitch.check_streamer_online(
@@ -296,7 +296,7 @@ class WebSocketsPool:
                                     event_dict["outcomes"],
                                 )
                                 if (
-                                    streamer.is_online
+                                    streamer.online
                                     and event.closing_bet_after(current_tmsp) > 0
                                 ):
                                     bet_settings = streamer.settings.bet
@@ -323,6 +323,10 @@ class WebSocketsPool:
                                             extra={
                                                 "emoji": ":alarm_clock:",
                                                 "event": Events.BET_START,
+                                                "links": {
+                                                    ws.events_predictions[event_id].streamer.printable_display_name:
+                                                        ws.events_predictions[event_id].streamer.streamer_url
+                                                }
                                             },
                                         )
                                     else:
@@ -373,6 +377,8 @@ class WebSocketsPool:
                                         "event": Events.get(
                                             f"BET_{event_prediction.result['type']}"
                                         ),
+                                        "links": {event_prediction.streamer.printable_display_name:
+                                                      event_prediction.streamer.streamer_url}
                                     },
                                 )
 
