@@ -24,12 +24,12 @@ class Drop(object):
     ]
 
     def __init__(self, dict):
-        self.id = dict["id"]
-        self.name = dict["name"]
+        self.id: str = dict["id"]
+        self.name: str = dict["name"]
         self.benefit = ", ".join(
             list(set([bf["benefit"]["name"] for bf in dict["benefitEdges"]]))
         )
-        self.minutes_required = dict["requiredMinutesWatched"]
+        self.minutes_required: int = dict["requiredMinutesWatched"]
 
         self.has_preconditions_met = None  # [True, False], None we don't know
         self.current_minutes_watched = 0

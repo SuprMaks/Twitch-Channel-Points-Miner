@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
 from dateutil import parser
+from plum import dispatch
 
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
 from TwitchChannelPointsMiner.classes.Settings import Settings
+from TwitchChannelPointsMiner.classes.entities.Game import Game
+from TwitchChannelPointsMiner.classes.entities.GamesMngr import GamesMngr
 
 
 class Campaign(object):
@@ -19,23 +22,23 @@ class Campaign(object):
         "channels",
     ]
 
-    def __init__(self, dict):
-        self.id = dict["id"]
-        self.game = dict["game"]
-        self.name = dict["name"]
-        self.status = dict["status"]
+    def __init__(self, data: dict):
+        self.id: str = data["id"]
+        self.game = GamesMngr()(data["game"])
+        self.name = data["name"]
+        self.status = data["status"]
         self.channels = (
             []
-            if dict["allow"]["channels"] is None
-            else list(map(lambda x: x["id"], dict["allow"]["channels"]))
+            if data["allow"]["channels"] is None
+            else list(map(lambda x: x["id"], data["allow"]["channels"]))
         )
         self.in_inventory = False
 
-        self.end_at = parser.isoparse(dict["endAt"])
-        self.start_at = parser.isoparse(dict["startAt"])
+        self.end_at = parser.isoparse(data["endAt"])
+        self.start_at = parser.isoparse(data["startAt"])
         self.dt_match = self.start_at < datetime.now(timezone.utc) < self.end_at
 
-        self.drops = list(map(lambda x: Drop(x), dict["timeBasedDrops"]))
+        self.drops = list(map(lambda x: Drop(x), data["timeBasedDrops"]))
 
     def __repr__(self):
         return f"Campaign(id={self.id}, name={self.name}, game={self.game}, in_inventory={self.in_inventory})"

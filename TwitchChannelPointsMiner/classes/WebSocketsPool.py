@@ -13,6 +13,8 @@ from TwitchChannelPointsMiner.classes.entities.Message import Message
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
+from TwitchChannelPointsMiner.classes.entities.StreamerStorage import StreamerStorage
 from TwitchChannelPointsMiner.constants import WEBSOCKET
 from TwitchChannelPointsMiner.utils import internet_connection_available
 
@@ -30,9 +32,11 @@ class WebSocketsPool:
 
     """
     API Limits
-    - Clients can listen to up to 50 topics per connection. Trying to listen to more topics will result in an error message.
+    - Clients can listen to up to 50 topics per connection.
+    Trying to listen to more topics will result in an error message.
     - We recommend that a single client IP address establishes no more than 10 simultaneous connections.
-    The two limits above are likely to be relaxed for approved third-party applications, as we start to better understand third-party requirements.
+    The two limits above are likely to be relaxed for approved third-party applications,
+    as we start to better understand third-party requirements.
     """
 
     def submit(self, topic):
@@ -85,7 +89,7 @@ class WebSocketsPool:
                     sslopt={"cert_reqs": ssl.CERT_NONE}
                 )
             )
-            logger.warn("SSL certificate verification is disabled! Be aware!")
+            logger.warning("SSL certificate verification is disabled! Be aware!")
         else:
             thread_ws = Thread(target=lambda: self.ws[index].run_forever())
         thread_ws.daemon = True
@@ -249,16 +253,19 @@ class WebSocketsPool:
                         elif message.type == "stream-down":
                             streamer.online = False
                         elif message.type == "viewcount":
+                            if 'viewers' in message.message:
+                                streamer.stream.viewers_count = message.message['viewers']
                             if streamer.stream_up_elapsed():
-                                ws.twitch.check_streamer_online(
-                                    streamer
-                                )
+                                ws.twitch.check_streamer_online(streamer)
 
                     elif message.topic == "raid":
                         if message.type == "raid_update_v2":
                             raid = Raid(
                                 message.message["raid"]["id"],
-                                message.message["raid"]["target_login"],
+                                message.message["raid"]["viewer_count"],
+                                StreamerStorage()(Streamer(message.message["raid"]["target_id"],
+                                                           message.message["raid"]["target_login"],
+                                                           message.message["raid"]["target_display_name"]))
                             )
                             ws.twitch.update_raid(streamer, raid)
 
@@ -319,7 +326,8 @@ class WebSocketsPool:
                                         place_bet_thread.start()
 
                                         logger.info(
-                                            f"Place the bet after: {start_after}s for: {ws.events_predictions[event_id]}",
+                                            f"Place the bet after: {start_after}s for: "
+                                            f"{ws.events_predictions[event_id]}",
                                             extra={
                                                 "emoji": ":alarm_clock:",
                                                 "event": Events.BET_START,
@@ -331,7 +339,8 @@ class WebSocketsPool:
                                         )
                                     else:
                                         logger.info(
-                                            f"{streamer} have only {streamer.channel_points} channel points and the minimum for bet is: {bet_settings.minimum_points}",
+                                            f"{streamer} have only {streamer.channel_points} "
+                                            f"channel points and the minimum for bet is: {bet_settings.minimum_points}",
                                             extra={
                                                 "emoji": ":pushpin:",
                                                 "event": Events.BET_FILTERS,
@@ -378,7 +387,7 @@ class WebSocketsPool:
                                             f"BET_{event_prediction.result['type']}"
                                         ),
                                         "links": {event_prediction.streamer.printable_display_name:
-                                                      event_prediction.streamer.streamer_url}
+                                                  event_prediction.streamer.streamer_url}
                                     },
                                 )
 
@@ -386,7 +395,8 @@ class WebSocketsPool:
                                     "PREDICTION", points["gained"]
                                 )
 
-                                # Remove duplicate history records from previous message sent in community-points-user-v1
+                                # Remove duplicate history records from previous message sent
+                                # in community-points-user-v1
                                 if event_prediction.result["type"] == "REFUND":
                                     streamer.update_history(
                                         "REFUND",
@@ -413,7 +423,8 @@ class WebSocketsPool:
                                 if Settings.enable_analytics is True:
                                     streamer.persistent_annotations(
                                         "PREDICTION_MADE",
-                                        f"Decision: {event_prediction.bet.decision['choice']} - {event_prediction.title}",
+                                        f"Decision: {event_prediction.bet.decision['choice']} - "
+                                        f"{event_prediction.title}",
                                     )
                 except Exception:
                     logger.error(
@@ -430,7 +441,8 @@ class WebSocketsPool:
             if "ERR_BADAUTH" in error_message:
                 # Inform the user about the potential outdated cookie file
                 username = ws.twitch.twitch_login.username
-                logger.error(f"Received the ERR_BADAUTH error, most likely you have an outdated cookie file \"cookies\\{username}.pkl\". Delete this file and try again.")
+                logger.error(f"Received the ERR_BADAUTH error, most likely you have an outdated cookie file"
+                             f" \"cookies\\{username}.pkl\". Delete this file and try again.")
                 # Attempt to delete the outdated cookie file
                 # try:
                 #     cookie_file_path = os.path.join("cookies", f"{username}.pkl")

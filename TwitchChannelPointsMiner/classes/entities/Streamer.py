@@ -3,7 +3,6 @@ import logging
 import os
 import time
 from datetime import datetime
-from threading import Lock
 from plum import dispatch
 from typing import Union
 
@@ -13,6 +12,7 @@ from TwitchChannelPointsMiner.classes.entities.Stream import Stream
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.constants import URL
 from TwitchChannelPointsMiner.utils import _millify
+from TwitchChannelPointsMiner.classes.entities.LockedObject import LockedObject
 
 logger = logging.getLogger(__name__)
 
@@ -62,19 +62,23 @@ class StreamerSettings(object):
             self.chat = ChatPresence.ONLINE
 
     def __repr__(self):
-        return f"BetSettings(make_predictions={self.make_predictions}, follow_raid={self.follow_raid}, claim_drops={self.claim_drops}, claim_moments={self.claim_moments}, watch_streak={self.watch_streak}, bet={self.bet}, chat={self.chat})"
+        return f"BetSettings(make_predictions={self.make_predictions}, follow_raid={self.follow_raid}, "\
+               "claim_drops={self.claim_drops}, claim_moments={self.claim_moments}, watch_streak={self.watch_streak}, "\
+               "bet={self.bet}, chat={self.chat})"
 
 
-class Streamer(object):
+class Streamer(LockedObject):
     __slots__ = [
         "_username",
         "_channel_id",
         "_display_name",
         "settings",
+
         "_online",
         "stream_up",
         "online_at",
         "offline_at",
+
         "start_channel_points",
         "channel_points",
         "minute_watched_requests",
@@ -84,11 +88,11 @@ class Streamer(object):
         "stream",
         "raid",
         "history",
-        "_lock",
     ]
 
     @dispatch
     def __init__(self, username: str, settings: StreamerSettings = StreamerSettings()):
+        super().__init__()
         self._username: str = username.lower().strip()
         self._display_name: str = ''
         self._channel_id: int = 0
@@ -109,51 +113,35 @@ class Streamer(object):
         self.raid = None
         self.history = {}
 
-        self._lock = Lock()
-
     @dispatch
-    def __init__(self, username: str, display_name: str, settings: StreamerSettings = StreamerSettings()):
+    def __init__(self, username: str, display_name: str = '', settings: StreamerSettings = StreamerSettings()):
         self.__init__(username, settings)
         self.display_name = display_name
 
-    def __enter__(self):
-        """Context manager enter the block, acquire the lock."""
-        self._lock.acquire()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit the block, release the lock."""
-        self._lock.release()
-
-    def __getstate__(self):
-        """Enable Pickling inside context blocks,
-        through inclusion of the slot entries without the lock."""
-        return dict(
-            (slot, getattr(self, slot))
-            for slot in self.__slots__
-            if hasattr(self, slot) and slot != '_lock'
-        )
-
-    def __setstate__(self, state):
-        """Restore the instance from pickle including the slot entries,
-        without addition of a fresh lock.
-        """
-        for slot, value in getattr(state, 'items')():
-            setattr(self, slot, value)
-        self._lock = Lock()
+    @dispatch
+    def __init__(self, channel_id: Union[str, int], username: str,
+                 display_name: str = '', settings: StreamerSettings = StreamerSettings()):
+        self.__init__(username, display_name, settings)
+        self.channel_id = channel_id
 
     def __repr__(self):
-        return f"Streamer(username={self.username}, channel_id={self.channel_id}, channel_points={_millify(self.channel_points)})"
+        return f"Streamer(username={self.username}, channel_id={self.channel_id}, "\
+               f"channel_points={self.channel_points_printable})"
 
     def __str__(self):
         # display_name = self.display_name
         # if self.username != display_name.lower():
         #     display_name = f"{self.display_name}({self.username})"
         return (
-            f"{self.printable_display_name} ({_millify(self.channel_points)} points)"
+            f"{self.printable_display_name}"
+            f"{' ' + self.gained_points_printable + ('/' if self.channel_points else '') if self.gained_points else ''}"
+            f"{('' if self.gained_points else ' ') + self.channel_points_printable if self.channel_points else ''}"
             if Settings.logger.less
             else self.__repr__()
         )
+
+    def __bool__(self):
+        return self.channel_id or self.username
 
     @property
     def printable_display_name(self) -> str:
@@ -186,7 +174,8 @@ class Streamer(object):
 
     @channel_id.setter
     def channel_id(self, data: Union[str, int]):
-        self._channel_id = int(data)
+        if data and (data:=int(data)):
+            self._channel_id = data
 
     @property
     def streamer_url(self):
@@ -218,6 +207,20 @@ class Streamer(object):
             },
         )
 
+    @property
+    def channel_points_printable(self) -> str:
+        return _millify(self.channel_points)
+
+    @property
+    def gained_points(self) -> int:
+        # with self:
+        return self.channel_points - self.start_channel_points
+
+    @property
+    def gained_points_printable(self) -> str:
+        diff = self.gained_points
+        return f"{'+' if diff > 0 else ''}{_millify(diff)}"
+
     def print_history(self):
         return ", ".join(
             [
@@ -244,7 +247,7 @@ class Streamer(object):
             self.settings.claim_drops
             and self.online
             # and self.stream.drops_tags is True
-            and self.stream.campaigns_ids != []
+            and self.stream.campaigns_ids
         )
 
     def viewer_has_points_multiplier(self):
@@ -281,7 +284,8 @@ class Streamer(object):
             primary_color = (
                 "#45c1ff"  # blue #45c1ff yellow #ffe045 green #36b535 red #ff4545
                 if event_type == "WATCH_STREAK"
-                else ("#ffe045" if event_type == "PREDICTION_MADE" else ("#36b535" if event_type == "WIN" else "#ff4545"))
+                else ("#ffe045" if event_type == "PREDICTION_MADE"
+                      else ("#36b535" if event_type == "WIN" else "#ff4545"))
             )
             data = {
                 "borderColor": primary_color,
@@ -308,18 +312,17 @@ class Streamer(object):
         fname = os.path.join(Settings.analytics_path, f"{self.username}.json")
         temp_fname = fname + '.temp'  # Temporary file name
 
-        with self:
-            # Create and write to the temporary file
-            with open(temp_fname, "w") as temp_file:
-                json_data = json.load(
-                    open(fname, "r")) if os.path.isfile(fname) else {}
-                if key not in json_data:
-                    json_data[key] = []
-                json_data[key].append(data)
-                json.dump(json_data, temp_file, indent=4)
+        # Create and write to the temporary file
+        with self, open(temp_fname, "w") as temp_file:
+            json_data = json.load(
+                open(fname, "r")) if os.path.isfile(fname) else {}
+            if key not in json_data:
+                json_data[key] = []
+            json_data[key].append(data)
+            json.dump(json_data, temp_file, indent=4)
 
-            # Replace the original file with the temporary file
-            os.replace(temp_fname, fname)
+        # Replace the original file with the temporary file
+        os.replace(temp_fname, fname)
 
     def leave_chat(self):
         if self.irc_chat is not None:
@@ -352,3 +355,26 @@ class Streamer(object):
                     self.leave_chat()
                 elif self.settings.chat == ChatPresence.OFFLINE:
                     self.__join_chat()
+
+    def payload(self):
+        with self:
+            data = {
+                "channel": self.username,
+                "channel_id": self.channel_id,
+                "broadcast_id": self.stream.id,
+                # "player": "site",
+                # "user_id": self.twitch_login.get_user_id(),
+                # "live": True,
+
+                # 'game_id': str(self.stream.game.id),
+                # 'game': self.stream.game.name,
+
+                "url": self.streamer_url,
+            }
+
+        if self.settings.claim_drops:
+            with self.stream.game:
+                data.update({'game_id': str(self.stream.game.id),
+                             'game': self.stream.game.name})
+
+        return data

@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from locked_dict.locked_dict import LockedDict
+from typing import Optional
 
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
 from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
@@ -22,10 +23,9 @@ from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistExce
 from TwitchChannelPointsMiner.classes.Settings import FollowersOrder, Priority, Settings
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+from TwitchChannelPointsMiner.classes.entities.StreamerStorage import StreamerStorage
 from TwitchChannelPointsMiner.logger import LoggerSettings, configure_loggers
 from TwitchChannelPointsMiner.utils import (
-    _millify,
-    at_least_one_value_in_settings_is,
     check_versions,
     get_user_agent,
     internet_connection_available,
@@ -68,7 +68,7 @@ class TwitchChannelPointsMiner:
         "session_id",
         "_running",
         "start_datetime",
-        "_streamers_archive",
+        "_streamers_storage",
         "logs_file",
         "queue_listener",
     ]
@@ -96,7 +96,8 @@ class TwitchChannelPointsMiner:
             logger.error("No username, exiting...")
             sys.exit(0)
 
-        # This disables certificate verification and allows the connection to proceed, but also makes it vulnerable to man-in-the-middle (MITM) attacks.
+        # This disables certificate verification and allows the connection to proceed,
+        # but also makes it vulnerable to man-in-the-middle (MITM) attacks.
         Settings.disable_ssl_cert_verification = disable_ssl_cert_verification
 
         Settings.disable_at_in_nickname = disable_at_in_nickname
@@ -123,7 +124,7 @@ class TwitchChannelPointsMiner:
         # Analytics switch
         Settings.enable_analytics = enable_analytics
 
-        if enable_analytics is True:
+        if enable_analytics:
             Settings.analytics_path = os.path.join(
                 Path().absolute(), "analytics", username
             )
@@ -156,7 +157,7 @@ class TwitchChannelPointsMiner:
         self.session_id = str(uuid.uuid4())
         self._running = False
         self.start_datetime = None
-        self._streamers_archive = {}
+        self._streamers_storage = StreamerStorage()
 
         self.logs_file, self.queue_listener = configure_loggers(
             self.username, logger_settings
@@ -191,7 +192,7 @@ class TwitchChannelPointsMiner:
         days_ago: int = 7,
     ):
         # Analytics switch
-        if Settings.enable_analytics is True:
+        if Settings.enable_analytics:
             from TwitchChannelPointsMiner.classes.AnalyticsServer import AnalyticsServer
 
             http_server = AnalyticsServer(
@@ -206,8 +207,8 @@ class TwitchChannelPointsMiner:
 
     def mine(
         self,
-        streamers: list = [],
-        blacklist: list = [],
+        streamers: Optional[list] = None,
+        blacklist: Optional[list] = None,
         followers: bool = False,
         followers_order: FollowersOrder = FollowersOrder.ASC,
     ):
@@ -218,15 +219,14 @@ class TwitchChannelPointsMiner:
                 else streamer.lower().strip()
             )
             if username not in blacklist:
-                #del streamer.mutex
                 self._streamers_dict[username] = streamer
 
         self.run(blacklist=blacklist, followers=followers, followers_order=followers_order)
 
-    def upd_streamers_list(self,
-                           blacklist: list = [],
-                           followers: bool = False,
-                           followers_order: FollowersOrder = FollowersOrder.ASC,):
+    def upd_work_set(self,
+                     blacklist: Optional[list] = None,
+                     followers: bool = False,
+                     followers_order: FollowersOrder = FollowersOrder.ASC, ):
         # Subscribe to community-points-user. Get update for points spent or gains
         user_id = self.twitch.twitch_login.get_user_id()
         # print(f"!!!!!!!!!!!!!! USER_ID: {user_id}")
@@ -243,10 +243,10 @@ class TwitchChannelPointsMiner:
             )
         )
 
-        def is_key_value_in_object_dict(d, key, val):
-            for i, v in d.items():
-                if hasattr(v, key) and getattr(v, key) == val:
-                    return i
+        def is_key_value_in_object_dict(d, key, _val):
+            for _i, v in d.items():
+                if hasattr(v, key) and getattr(v, key) == _val:
+                    return _i
             return None
 
         make_predictions = False
@@ -257,9 +257,8 @@ class TwitchChannelPointsMiner:
                 if is_key_value_in_object_dict(self.streamers, 'username', username) is None:
                     new_streamers[username] = copy.deepcopy(val)
 
-            if followers is True:
-                followers_array = self.twitch.get_followers(
-                    order=followers_order)
+            if followers:
+                followers_array = self.twitch.get_followers(order=followers_order)
                 logger.info(
                     f"Load {len(followers_array)} followers from your profile!",
                     extra={"emoji": ":clipboard:"},
@@ -273,18 +272,18 @@ class TwitchChannelPointsMiner:
                                         streamer=streamer)
                         )
 
-                        if self.streamers[id].settings.follow_raid is True:
+                        if self.streamers[id].settings.follow_raid:
                             self.ws_pool.unsubscribe(
                                 PubsubTopic("raid",
                                             streamer=streamer))
 
-                        if self.streamers[id].settings.make_predictions is True:
+                        if self.streamers[id].settings.make_predictions:
                             self.ws_pool.unsubscribe(
                                 PubsubTopic("predictions-channel-v1",
                                             streamer=streamer)
                             )
 
-                        if self.streamers[id].settings.claim_moments is True:
+                        if self.streamers[id].settings.claim_moments:
                             self.ws_pool.unsubscribe(
                                 PubsubTopic("community-moments-channel-v1",
                                             streamer=streamer)
@@ -298,14 +297,14 @@ class TwitchChannelPointsMiner:
                             },
                         )
 
-                        with self.streamers as streamers_locked:
-                            with streamer:
-                                self._streamers_archive[id] = copy.deepcopy(streamer)
-                            del streamers_locked[id]
+                        with self.streamers:
+                            with streamer, self._streamers_storage:
+                                self._streamers_storage[id] = streamer
+                            del self.streamers[id]
 
-                        if make_predictions and streamer.settings.make_predictions is True:
+                        if make_predictions and streamer.settings.make_predictions:
                             for _, streamer in self.streamers.items():
-                                if streamer.settings.make_predictions is True:
+                                if streamer.settings.make_predictions:
                                     break
                             else:
                                 make_predictions = False
@@ -333,23 +332,22 @@ class TwitchChannelPointsMiner:
                 )
 
                 for username, val in new_streamers.items():
-                    if self._running is False:
+                    if not self._running:
                         break
 
                     time.sleep(random.uniform(0.3, 0.7))
 
                     try:
-                        streamer = (
-                            val
-                            if isinstance(val, Streamer) is True
-                            else Streamer(username, val)
-                        )
-                        streamer.channel_id = self.twitch.get_channel_id(username)
+                        streamer = val if isinstance(val, Streamer) else Streamer(username, val)
+                        if channel_id:=self.twitch.get_channel_id(username):
+                            channel_id = int(channel_id)
+                            streamer.channel_id = channel_id
+                        else:
+                            continue
 
-                        channel_id = int(streamer.channel_id)
                         # Restore history and start points
-                        if channel_id in self._streamers_archive:
-                            streamer = copy.deepcopy(self._streamers_archive[channel_id])
+                        if channel_id in self._streamers_storage:
+                            streamer = self._streamers_storage[channel_id]
                             logger.info(
                                 f"Restoring data for {streamer.printable_display_name}...",
                                 extra={
@@ -398,29 +396,29 @@ class TwitchChannelPointsMiner:
                         time.sleep(random.uniform(0.3, 0.7))
                         self.twitch.load_channel_points_context(streamer)
 
-                        if channel_id in self._streamers_archive:
-                            del self._streamers_archive[channel_id]
-                        else:
+                        if channel_id not in self._streamers_storage:
+                            with self._streamers_storage:
+                                self._streamers_storage[channel_id] = streamer
                             streamer.start_channel_points = streamer.channel_points
 
                         self.twitch.check_streamer_online(streamer)
                         # self.twitch.viewer_is_mod(streamer)
 
-                        with self.streamers as streamers_locked, streamer:
-                            streamers_locked[channel_id] = copy.deepcopy(streamer)
+                        with self.streamers, streamer:
+                            self.streamers[channel_id] = streamer
 
                         self.ws_pool.submit(
                             PubsubTopic("video-playback-by-id",
                                         streamer=self.streamers[channel_id])
                         )
 
-                        if streamer.settings.follow_raid is True:
+                        if streamer.settings.follow_raid:
                             self.ws_pool.submit(
                                 PubsubTopic("raid",
                                             streamer=self.streamers[channel_id]))
 
-                        if streamer.settings.make_predictions is True:
-                            if make_predictions is False:
+                        if streamer.settings.make_predictions:
+                            if not make_predictions:
                                 make_predictions = True
 
                                 # Going to subscribe to predictions-user-v1.
@@ -437,7 +435,7 @@ class TwitchChannelPointsMiner:
                                             streamer=self.streamers[channel_id])
                             )
 
-                        if streamer.settings.claim_moments is True:
+                        if streamer.settings.claim_moments:
                             self.ws_pool.submit(
                                 PubsubTopic("community-moments-channel-v1",
                                             streamer=self.streamers[channel_id])
@@ -463,7 +461,7 @@ class TwitchChannelPointsMiner:
 
     def run(
         self,
-        blacklist: list = [],
+        blacklist: Optional[list] = None,
         followers: bool = False,
         followers_order: FollowersOrder = FollowersOrder.ASC,
     ):
@@ -478,7 +476,7 @@ class TwitchChannelPointsMiner:
 
             self.twitch.login()
 
-            if self.claim_drops_startup is True:
+            if self.claim_drops_startup:
                 self.twitch.claim_all_drops_from_inventory()
 
             self.ws_pool = WebSocketsPool(
@@ -487,12 +485,12 @@ class TwitchChannelPointsMiner:
                 events_predictions=self.events_predictions,
             )
 
-            self._threads['update_streamers_thread'] = threading.Thread(
-                target=self.upd_streamers_list,
+            self._threads['upd_work_set'] = threading.Thread(
+                target=self.upd_work_set,
                 name="Reload streamer list",
                 args=(blacklist, followers, followers_order),
             )
-            self._threads['update_streamers_thread'].start()
+            self._threads['upd_work_set'].start()
 
             self._threads['sync_campaigns_thread'] = threading.Thread(
                 target=self.twitch.sync_campaigns,
@@ -511,18 +509,19 @@ class TwitchChannelPointsMiner:
             while self._running:
                 time.sleep(random.uniform(20, 60))
                 # Do an external control for WebSocket. Check if the thread is running
-                # Check if is not None because maybe we have already created a new connection on array+1 and now index is None
+                # Check if is not None because maybe we have already created a new connection on array+1
+                # and now index is None
                 for index, ws in enumerate(self.ws_pool.ws):
                     if (
-                        ws.is_reconnecting is False
+                        not ws.is_reconnecting
                         and ws.elapsed_last_ping() > 10
-                        and internet_connection_available() is True
+                        and internet_connection_available()
                     ):
                         logger.info(
-                            f"#{index} - The last PING was sent more than 10 minutes ago. Reconnecting to the WebSocket..."
+                            f"#{index} - The last PING was sent more than 10 minutes ago. "
+                            "Reconnecting to the WebSocket..."
                         )
-                        WebSocketsPool.handle_reconnection(
-                            self.ws_pool.ws[index])
+                        WebSocketsPool.handle_reconnection(self.ws_pool.ws[index])
 
     def end(self, signum, frame):
         logger.info("CTRL+C Detected! Please wait just a moment!")
@@ -530,19 +529,19 @@ class TwitchChannelPointsMiner:
         with self.streamers as streamers_locked:
             for _, streamer in streamers_locked.items():
                 if (
-                    streamer.irc_chat is not None
+                    streamer.irc_chat
                     and streamer.settings.chat != ChatPresence.NEVER
                 ):
                     streamer.leave_chat()
-                    if streamer.irc_chat.is_alive() is True:
+                    if streamer.irc_chat.is_alive():
                         streamer.irc_chat.join()
 
-        self._running = self.twitch.running = False
-        if self.ws_pool is not None:
+        self._running = self.twitch._running = False
+        if self.ws_pool:
             self.ws_pool.end()
 
         for _, thread in self._threads.items():
-            if thread is not None:
+            if thread:
                 thread.join()
 
         # Check if all the mutex are unlocked.
@@ -564,7 +563,7 @@ class TwitchChannelPointsMiner:
         logger.info(
             f"Ending session: '{self.session_id}'", extra={"emoji": ":stop_sign:"}
         )
-        if self.logs_file is not None:
+        if self.logs_file:
             logger.info(
                 f"Logs file: {self.logs_file}", extra={"emoji": ":page_facing_up:"}
             )
@@ -578,14 +577,14 @@ class TwitchChannelPointsMiner:
             for event_id in self.events_predictions:
                 event = self.events_predictions[event_id]
                 if (
-                    event.bet_confirmed is True
-                    and event.streamer.settings.make_predictions is True
+                    event.bet_confirmed
+                    and event.streamer.settings.make_predictions
                 ):
                     logger.info(
                         f"{event.streamer.settings.bet}",
                         extra={"emoji": ":wrench:"},
                     )
-                    if event.streamer.settings.bet.filter_condition is not None:
+                    if event.streamer.settings.bet.filter_condition:
                         logger.info(
                             f"{event.streamer.settings.bet.filter_condition}",
                             extra={"emoji": ":pushpin:"},
@@ -598,26 +597,21 @@ class TwitchChannelPointsMiner:
                         },
                     )
 
-        def print_total(streamer: Streamer):
-            if streamer.history != {}:
-                logger.info(
-                    f"{repr(streamer)}, Total Points Gained (after farming - before farming): "
-                    f"{_millify((streamer.channel_points - streamer.start_channel_points))}",
-                    extra={
-                        "emoji": ":robot:",
-                        "links": {streamer.username: streamer.streamer_url}
-                    },
-                )
-                if streamer.history != {}:
-                    logger.info(
-                        f"{streamer.print_history()}",
-                        extra={"emoji": ":moneybag:"},
-                    )
-
         print("")
-        with self.streamers as streamers_locked:
-            for _, streamer in streamers_locked.items():
-                print_total(streamer)
-
-        for _, streamer in self._streamers_archive.items():
-            print_total(streamer)
+        with self._streamers_storage:
+            for _, streamer in self._streamers_storage.items():
+                with streamer:
+                    if streamer.channel_points - streamer.start_channel_points:
+                        if streamer.history:
+                            logger.info(
+                                f"{repr(streamer)}, Total Points Gained (after farming - before farming): "
+                                f"{streamer.gained_points_printable}",
+                                extra={
+                                    "emoji": ":robot:",
+                                    "links": {streamer.username: streamer.streamer_url}
+                                },
+                            )
+                            logger.info(
+                                f"{streamer.print_history()}",
+                                extra={"emoji": ":moneybag:"},
+                            )

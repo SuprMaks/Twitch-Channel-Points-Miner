@@ -26,7 +26,6 @@ setuptools.setup(
     packages=setuptools.find_packages(),
     include_package_data=True,
     install_requires=[
-        "requests",
         "websocket-client",
         "pillow",
         "python-dateutil",
@@ -38,8 +37,9 @@ setuptools.setup(
         "irc",
         "pandas",
         "pytz",
-        "locked-dict"
-        "plum-dispatch"
+        "locked-dict",
+        "plum-dispatch",
+        "urllib3",
     ],
     long_description=read("README.md"),
     long_description_content_type="text/markdown",

@@ -2,17 +2,20 @@ import json
 import logging
 import time
 from base64 import b64encode
+from typing import Union, Optional
 
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.constants import DROP_ID
+from TwitchChannelPointsMiner.classes.entities.Game import Game
+from TwitchChannelPointsMiner.classes.entities.LockedObject import LockedObject
 
 logger = logging.getLogger(__name__)
 
 
-class Stream(object):
+class Stream(LockedObject):
     __slots__ = [
-        "broadcast_id",
-        "title",
+        "_id",
+        "_title",
         "game",
         "tags",
         "drops_tags",
@@ -20,57 +23,90 @@ class Stream(object):
         "campaigns_ids",
         "viewers_count",
         "spade_url",
-        "payload",
+        # "payload",
         "watch_streak_missing",
         "minute_watched",
-        "__last_update",
-        "__minute_watched_timestamp",
+        "_last_update",
+        "_minute_watched_timestamp",
     ]
 
     def __init__(self):
-        self.broadcast_id = None
+        super().__init__()
+        self._id: Optional[int] = None
 
-        self.title = None
-        self.game = {}
+        self._title: Optional[str] = None
+        self.game: Game = Game()
         self.tags = []
 
         self.drops_tags = False
         self.campaigns = []
         self.campaigns_ids = []
 
-        self.viewers_count = 0
-        self.__last_update = 0
+        self.viewers_count: int = 0
+        self._last_update: float = 0
 
-        self.spade_url = None
-        self.payload = None
+        self.spade_url: Optional[str] = None
+        # self.payload = {}
 
         self.init_watch_streak()
 
-    def encode_payload(self) -> dict:
-        json_event = json.dumps(self.payload, separators=(",", ":"))
-        return {"data": (b64encode(json_event.encode("utf-8"))).decode("utf-8")}
-
-    def update(self, broadcast_id, title, game, tags, viewers_count):
-        self.broadcast_id = broadcast_id
-        self.title = title.strip()
-        self.game = game
-        # #343 temporary workaround
-        self.tags = tags or []
-        # ------------------------
-        self.viewers_count = viewers_count
-
-        self.drops_tags = (
-            DROP_ID in [tag["id"] for tag in self.tags] and self.game != {}
-        )
-        self.__last_update = time.time()
-
-        logger.debug(f"Update: {self}")
-
     def __repr__(self):
-        return f"Stream(title={self.title}, game={self.__str_game()}, tags={self.__str_tags()})"
+        return f"Stream(title={self._title}, game={self.game}, tags={self.__str_tags()})"
 
     def __str__(self):
-        return f"{self.title}" if Settings.logger.less else self.__repr__()
+        return f"{self._title}" if Settings.logger.less else self.__repr__()
+
+    @property
+    def id(self) -> Optional[str]:
+        if self._id:
+            return str(self._id)
+        return None
+
+    @id.setter
+    def id(self, id: Optional[Union[int, str]]):
+        if id and (id:=int(id)):
+            self._id = id
+        else:
+            self._id = None
+
+    @property
+    def title(self) -> Optional[str]:
+        return self._title
+
+    @title.setter
+    def title(self, title: Optional[str]):
+        if title and (title:=title.strip()):
+            self._title = title
+        else:
+            self._title = None
+
+    # def encode_payload(self) -> dict:
+        # json_event = json.dumps(self.payload, separators=(",", ":"))
+        # return (b64encode(json_event.encode("utf-8"))).decode("utf-8")
+        # return self.payload
+
+    def update(self, id: Optional[Union[int, str]], title: Optional[str],
+               game: Game, tags, viewers_count: Union[str, int]):
+
+        with self:
+            self.id = id
+            self.title = title
+            self.game = game
+
+            # #343 temporary workaround
+            self.tags = tags or []
+            # ------------------------
+            if viewers_count and (viewers_count:=int(viewers_count)):
+                self.viewers_count = viewers_count
+            else:
+                self.viewers_count = 0
+
+            self.drops_tags = (
+                DROP_ID in [tag["id"] for tag in self.tags] and self.game != {}
+            )
+            self._last_update = time.time()
+
+        logger.debug(f"Update: {self}")
 
     def __str_tags(self):
         return (
@@ -79,29 +115,19 @@ class Stream(object):
             else ", ".join([tag["localizedName"] for tag in self.tags])
         )
 
-    def __str_game(self):
-        return None if self.game in [{}, None] else self.game["displayName"]
-
-    def game_name(self):
-        return None if self.game in [{}, None] else self.game["name"]
-    
-    def game_id(self):
-        return None if self.game in [{}, None] else self.game["id"]
-
     def update_required(self):
-        return self.__last_update == 0 or self.update_elapsed() >= 120
+        return self._last_update == 0 or self.update_elapsed() >= 120
 
     def update_elapsed(self):
-        return 0 if self.__last_update == 0 else (time.time() - self.__last_update)
+        return 0 if self._last_update == 0 else (time.time() - self._last_update)
 
     def init_watch_streak(self):
         self.watch_streak_missing = True
         self.minute_watched = 0
-        self.__minute_watched_timestamp = 0
+        self._minute_watched_timestamp = 0
 
     def update_minute_watched(self):
-        if self.__minute_watched_timestamp != 0:
+        if self._minute_watched_timestamp != 0:
             self.minute_watched += round(
-                (time.time() - self.__minute_watched_timestamp) / 60, 5
-            )
-        self.__minute_watched_timestamp = time.time()
+                (time.time() - self._minute_watched_timestamp) / 60, 5)
+        self._minute_watched_timestamp = time.time()

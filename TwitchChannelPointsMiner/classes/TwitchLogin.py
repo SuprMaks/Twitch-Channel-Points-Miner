@@ -7,20 +7,22 @@ import copy
 import logging
 import os
 import pickle
+from datetime import datetime, timedelta, timezone
+from time import sleep
 
 # import webbrowser
 # import browser_cookie3
 
-import requests
+from TwitchChannelPointsMiner.classes.TwitchGQL import TwitchGQL
+from TwitchChannelPointsMiner.classes.TwitchGQLQuery import TwitchGQLQuery, TwitchGQLQuerys
 
 from TwitchChannelPointsMiner.classes.Exceptions import (
     BadCredentialsException,
     WrongCookiesException,
 )
-from TwitchChannelPointsMiner.constants import CLIENT_ID, GQLOperations, USER_AGENTS
+from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
+from TwitchChannelPointsMiner.constants import TWITCH_POOL
 
-from datetime import datetime, timedelta, timezone
-from time import sleep
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +46,7 @@ class TwitchLogin(object):
         "device_id",
         "token",
         "login_check_result",
-        "session",
-        "session",
+        "_twitch_gql",
         "username",
         "password",
         "user_id",
@@ -59,11 +60,9 @@ class TwitchLogin(object):
         self.device_id = device_id
         self.token = None
         self.login_check_result = False
-        self.session = requests.session()
-        self.session.headers.update(
-            {"Client-ID": self.client_id,
-                "X-Device-Id": self.device_id, "User-Agent": user_agent}
-        )
+        self._twitch_gql = TwitchGQL(pool=TWITCH_POOL, headers={"Client-ID": self.client_id,
+                                                                "X-Device-Id": self.device_id,
+                                                                "User-Agent": user_agent})
         self.username = username
         self.password = password
         self.user_id = None
@@ -180,7 +179,7 @@ class TwitchLogin(object):
 
     def set_token(self, new_token):
         self.token = new_token
-        self.session.headers.update({"Authorization": f"Bearer {self.token}"})
+        self._twitch_gql.headers.update({"Authorization": f"Bearer {self.token}"})
 
     # def send_login_request(self, json_data):
     def send_oauth_request(self, url, json_data):
@@ -192,7 +191,7 @@ class TwitchLogin(object):
             'Content-Type': 'application/json; charset=UTF-8',
             'Host': 'passport.twitch.tv'
         },)"""
-        response = self.session.post(url, data=json_data, headers={
+        response = self._twitch_gql(url, data=json_data, headers={
             'Accept': 'application/json',
             'Accept-Encoding': 'gzip',
             'Accept-Language': 'en-US',
@@ -341,18 +340,13 @@ class TwitchLogin(object):
         return user_id
 
     def __set_user_id(self):
-        json_data = copy.deepcopy(GQLOperations.ReportMenuItem)
-        json_data["variables"] = {"channelLogin": self.username}
-        response = self.session.post(GQLOperations.url, json=json_data)
-
-        if response.status_code == 200:
-            json_response = response.json()
+        if response := self._twitch_gql(TwitchGQLQuerys.ReportMenuItem, {"channelLogin": self.username}):
             if (
-                "data" in json_response
-                and "user" in json_response["data"]
-                and json_response["data"]["user"]["id"] is not None
+                "data" in response
+                and "user" in response["data"]
+                and response["data"]["user"]["id"] is not None
             ):
-                self.user_id = json_response["data"]["user"]["id"]
+                self.user_id = response["data"]["user"]["id"]
                 return True
         return False
 

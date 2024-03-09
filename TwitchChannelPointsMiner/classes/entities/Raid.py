@@ -1,12 +1,19 @@
-class Raid(object):
-    __slots__ = ["raid_id", "target_login"]
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 
-    def __init__(self, raid_id, target_login):
-        self.raid_id = raid_id
-        self.target_login = target_login
+
+class Raid(object):
+    __slots__ = ["id", "viewer_count", "target_streamer"]
+
+    def __init__(self, raid_id: str, viewer_count: int, target_streamer: Streamer):
+        self.id: str = raid_id
+        self.viewer_count = viewer_count
+        self.target_streamer: Streamer = target_streamer
 
     def __eq__(self, other):
         if isinstance(other, self.__class__):
-            return self.raid_id == other.raid_id
+            return self.id == other.id
         else:
             return False
+
+    def __repr__(self):
+        return f"Raid to {self.target_streamer}"

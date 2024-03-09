@@ -1,10 +1,11 @@
 import copy
 from enum import Enum, auto
 from random import uniform
+from typing import Tuple, Union, Any
 
 from millify import millify
 
-#from TwitchChannelPointsMiner.utils import char_decision_as_index, float_round
+# from TwitchChannelPointsMiner.utils import char_decision_as_index, float_round
 from TwitchChannelPointsMiner.utils import float_round
 
 
@@ -130,7 +131,9 @@ class BetSettings(object):
         )
 
     def __repr__(self):
-        return f"BetSettings(strategy={self.strategy}, percentage={self.percentage}, percentage_gap={self.percentage_gap}, max_points={self.max_points}, minimum_points={self.minimum_points}, stealth_mode={self.stealth_mode})"
+        return f"BetSettings(strategy={self.strategy}, percentage={self.percentage}, "\
+               f"percentage_gap={self.percentage_gap}, max_points={self.max_points}, "\
+               f"minimum_points={self.minimum_points}, stealth_mode={self.stealth_mode})"
 
 
 class Bet(object):
@@ -152,7 +155,7 @@ class Bet(object):
             self.outcomes[index][OutcomeKeys.TOTAL_POINTS] = int(
                 outcomes[index][OutcomeKeys.TOTAL_POINTS]
             )
-            if outcomes[index]["top_predictors"] != []:
+            if outcomes[index]["top_predictors"]:
                 # Sort by points placed by other users
                 outcomes[index]["top_predictors"] = sorted(
                     outcomes[index]["top_predictors"],
@@ -170,22 +173,19 @@ class Bet(object):
             self.total_users += self.outcomes[index][OutcomeKeys.TOTAL_USERS]
             self.total_points += self.outcomes[index][OutcomeKeys.TOTAL_POINTS]
 
-        if (
-            self.total_users > 0
-            and self.total_points > 0
-        ):
+        if self.total_users > 0 and self.total_points > 0:
             for index in range(0, len(self.outcomes)):
                 self.outcomes[index][OutcomeKeys.PERCENTAGE_USERS] = float_round(
                     (100 * self.outcomes[index][OutcomeKeys.TOTAL_USERS]) / self.total_users
                 )
                 self.outcomes[index][OutcomeKeys.ODDS] = float_round(
-                    #self.total_points / max(self.outcomes[index][OutcomeKeys.TOTAL_POINTS], 1)
+                    # self.total_points / max(self.outcomes[index][OutcomeKeys.TOTAL_POINTS], 1)
                     0
                     if self.outcomes[index][OutcomeKeys.TOTAL_POINTS] == 0
                     else self.total_points / self.outcomes[index][OutcomeKeys.TOTAL_POINTS]
                 )
                 self.outcomes[index][OutcomeKeys.ODDS_PERCENTAGE] = float_round(
-                    #100 / max(self.outcomes[index][OutcomeKeys.ODDS], 1)
+                    # 100 / max(self.outcomes[index][OutcomeKeys.ODDS], 1)
                     0
                     if self.outcomes[index][OutcomeKeys.ODDS] == 0
                     else 100 / self.outcomes[index][OutcomeKeys.ODDS]
@@ -194,16 +194,19 @@ class Bet(object):
         self.__clear_outcomes()
 
     def __repr__(self):
-        return f"Bet(total_users={millify(self.total_users)}, total_points={millify(self.total_points)}), decision={self.decision})\n\t\tOutcome A({self.get_outcome(0)})\n\t\tOutcome B({self.get_outcome(1)})"
+        return f"Bet(total_users={millify(self.total_users)}, total_points={millify(self.total_points)}), "\
+               f"decision={self.decision})\n\t\tOutcome A({self.get_outcome(0)})\n\t\tOutcome B({self.get_outcome(1)})"
 
     def get_decision(self, parsed=False):
-        #decision = self.outcomes[0 if self.decision["choice"] == "A" else 1]
+        # decision = self.outcomes[0 if self.decision["choice"] == "A" else 1]
         decision = self.outcomes[self.decision["choice"]]
         return decision if parsed is False else Bet.__parse_outcome(decision)
 
     @staticmethod
     def __parse_outcome(outcome):
-        return f"{outcome['title']} ({outcome['color']}), Points: {millify(outcome[OutcomeKeys.TOTAL_POINTS])}, Users: {millify(outcome[OutcomeKeys.TOTAL_USERS])} ({outcome[OutcomeKeys.PERCENTAGE_USERS]}%), Odds: {outcome[OutcomeKeys.ODDS]} ({outcome[OutcomeKeys.ODDS_PERCENTAGE]}%)"
+        return f"{outcome['title']} ({outcome['color']}), Points: {millify(outcome[OutcomeKeys.TOTAL_POINTS])}, "\
+               f"Users: {millify(outcome[OutcomeKeys.TOTAL_USERS])} ({outcome[OutcomeKeys.PERCENTAGE_USERS]}%), "\
+               f"Odds: {outcome[OutcomeKeys.ODDS]} ({outcome[OutcomeKeys.ODDS_PERCENTAGE]}%)"
 
     def get_outcome(self, index):
         return Bet.__parse_outcome(self.outcomes[index])
@@ -237,20 +240,20 @@ class Bet(object):
         return "A" if self.outcomes[0][key] > self.outcomes[1][key] else "B"'''
 
     def __return_choice(self, key) -> int:
-        largest=0
+        largest = 0
         for index in range(0, len(self.outcomes)):
             if self.outcomes[index][key] > self.outcomes[largest][key]:
                 largest = index
         return largest
 
     def __return_number_choice(self, number) -> int:
-        if (len(self.outcomes) > number):
+        if len(self.outcomes) > number:
             return number
         else:
             return 0
 
-    def skip(self) -> bool:
-        if self.settings.filter_condition is not None:
+    def skip(self) -> Tuple[bool, Union[list, Any]]:
+        if self.settings.filter_condition:
             # key == by , condition == where
             key = self.settings.filter_condition.by
             condition = self.settings.filter_condition.where
@@ -262,11 +265,9 @@ class Bet(object):
                 else key.replace("decision", "total")
             )
             if key in [OutcomeKeys.TOTAL_USERS, OutcomeKeys.TOTAL_POINTS]:
-                compared_value = (
-                    self.outcomes[0][fixed_key] + self.outcomes[1][fixed_key]
-                )
+                compared_value = (self.outcomes[0][fixed_key] + self.outcomes[1][fixed_key])
             else:
-                #outcome_index = char_decision_as_index(self.decision["choice"])
+                # outcome_index = char_decision_as_index(self.decision["choice"])
                 outcome_index = self.decision["choice"]
                 compared_value = self.outcomes[outcome_index][fixed_key]
 
@@ -324,8 +325,8 @@ class Bet(object):
                 else self.__return_choice(OutcomeKeys.TOTAL_USERS)
             )
 
-        if self.decision["choice"] is not None:
-            #index = char_decision_as_index(self.decision["choice"])
+        if self.decision["choice"]:
+            # index = char_decision_as_index(self.decision["choice"])
             index = self.decision["choice"]
             self.decision["id"] = self.outcomes[index]["id"]
             self.decision["amount"] = min(
@@ -333,7 +334,7 @@ class Bet(object):
                 self.settings.max_points,
             )
             if (
-                self.settings.stealth_mode is True
+                self.settings.stealth_mode
                 and self.decision["amount"]
                 >= self.outcomes[index][OutcomeKeys.TOP_POINTS]
             ):
