@@ -480,12 +480,11 @@ class Twitch(object):
                         'user_id': self.twitch_login.get_user_id(),
                     })
                     payload = [{"event": "minute-watched", "properties": payload}]
-                    json_event = json.dumps(payload, separators=(",", ":"))
-                    payload = (b64encode(json_event.encode("utf-8"))).decode("utf-8")
+                    payload = json.dumps(payload, separators=(",", ":"))
+                    payload = (b64encode(payload.encode("utf-8"))).decode("utf-8")
 
-                    if index != streamers_watching[-1] and \
-                            iteration_timestamp and \
-                            (delay:=iteration_timestamp + period - time.time()) > 0:
+                    if iteration_timestamp and \
+                       (delay:=(iteration_timestamp + period - time.time())) > 0:
                         self.__chuncked_sleep(delay, chunk_size=chunk_size)
                     try:
                         response = TWITCH_POOL.request_encode_body(method='POST',
