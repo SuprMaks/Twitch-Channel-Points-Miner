@@ -1,11 +1,11 @@
-from threading import Lock
+from threading import RLock
 
 
 class LockedObject(object):
     __slots__ = ('_lock',)
 
     def __init__(self):
-        self._lock = Lock()
+        self._lock = RLock()
 
     def __enter__(self):
         """Context manager enter the block, acquire the lock."""
@@ -31,4 +31,4 @@ class LockedObject(object):
         """
         for slot, value in getattr(state, 'items')():
             setattr(self, slot, value)
-        self._lock = Lock()
+        self._lock = RLock()

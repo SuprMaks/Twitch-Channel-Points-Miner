@@ -102,7 +102,7 @@ class TwitchGQL(object):
                 data = json.loads(body)
                 if data and isinstance(data, dict) and (e:=data.get('errors')):
                     logger.error(
-                        f"Error with TwitchGQL response req ( {req} ): {e}"
+                        f"Error with TwitchGQL response req ( {body} ): {e}"
                     )
                 return data
             except json.JSONDecodeError as e:

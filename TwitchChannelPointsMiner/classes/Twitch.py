@@ -18,10 +18,7 @@ import urllib3.request
 
 from TwitchChannelPointsMiner.classes.entities.CampaignMngr import CampaignMngr
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
-from TwitchChannelPointsMiner.classes.Exceptions import (
-    StreamerDoesNotExistException,
-    StreamerIsOfflineException,
-)
+from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistException
 from TwitchChannelPointsMiner.classes.Settings import (
     Events,
     FollowersOrder,
@@ -29,6 +26,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
 )
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.constants import (
     CLIENT_ID,
     CLIENT_VERSION,
@@ -62,7 +60,7 @@ class Twitch(object):
         "client_session",
         "client_version",
         "twilight_build_id_pattern",
-        "_twitch_gql"
+        "twitch_gql"
     ]
 
     def __init__(self, username, user_agent, password=None):
@@ -87,7 +85,7 @@ class Twitch(object):
             r"window\.__twilightBuildID=\"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}"
             "-4[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})\";"
         )
-        self._twitch_gql = TwitchGQL(pool=TWITCH_POOL)
+        self.twitch_gql = TwitchGQL(pool=TWITCH_POOL)
 
     def login(self):
         if not os.path.isfile(self.cookies_file):
@@ -97,7 +95,7 @@ class Twitch(object):
             self.twitch_login.load_cookies(self.cookies_file)
             self.twitch_login.set_token(self.twitch_login.get_auth_token())
 
-        self._twitch_gql.headers = {
+        self.twitch_gql.headers = {
             "Authorization": f"OAuth {self.twitch_login.get_auth_token()}",
             "Client-Id": CLIENT_ID,
             # "Client-Integrity": self.post_integrity(),
@@ -108,29 +106,9 @@ class Twitch(object):
         }
 
     # === STREAMER / STREAM / INFO === #
-    def update_stream(self, streamer):
-        if streamer.stream.update_required():
-            stream_info = self.get_stream_info(streamer)
-            if stream_info:
-                game = stream_info["broadcastSettings"]["game"]
-                game = GamesMngr()(game)
-
-                streamer.stream.update(
-                    id=stream_info["stream"]["id"],
-                    title=stream_info["broadcastSettings"]["title"],
-                    game=game,
-                    tags=stream_info["stream"]["tags"],
-                    viewers_count=stream_info["stream"]["viewersCount"],
-                )
-
-                if streamer.settings.claim_drops:
-                    # Update also the campaigns_ids so we are sure to tracking the correct campaign
-                    streamer.stream.campaigns_ids = (
-                        self.__get_campaign_ids_from_streamer(streamer)
-                    )
 
     @staticmethod
-    def get_spade_url(streamer):
+    def get_spade_url(streamer: Streamer):
         # fixes AttributeError: 'NoneType' object has no attribute 'group'
         # headers = {"User-Agent": self.user_agent}
         headers = {"User-Agent": USER_AGENTS["Linux"]["FIREFOX"]}
@@ -145,16 +123,15 @@ class Twitch(object):
 
         def get_spd_url(settings_url):
             settings_request = TWITCH_POOL.request('GET', settings_url, headers=headers)
-            streamer.stream.spade_url = re.search('"spade_url":"(.*?)"',
-                                                  settings_request.data.decode('utf-8')).group(1)
-            if not streamer.stream.spade_url:
+            streamer.stream_spade_url = spade_url = re.search('"spade_url":"(.*?)"',
+                                                              settings_request.data.decode('utf-8')).group(1)
+            if not spade_url:
                 logger.debug("Error with 'get_spade_url': no match 'spade_url'")
 
         try:
             get_spd_url(get_st_url())
         except urllib3.exceptions.RequestError as e:
             logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
-            raise StreamerIsOfflineException
 
     # def get_broadcast_id(self, streamer):
     #     # json_data = copy.deepcopy(GQLOperations.WithIsStreamLiveQuery)
@@ -166,36 +143,53 @@ class Twitch(object):
     #     else:
     #         return stream["id"]
 
-    def get_stream_info(self, streamer):
+    def upd_stream_info(self, streamer: Streamer, response=None) -> bool:
         # json_data = copy.deepcopy(
         #     GQLOperations.VideoPlayerStreamInfoOverlayChannel)
         # json_data["variables"] = {"channel": streamer.username}
-        response = self._twitch_gql(TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel, {"channel": streamer.username})
-        if response and not response.get('errors') and response["data"]["user"]["stream"]:
-            return response["data"]["user"]
-        else:
-            raise StreamerIsOfflineException
+        if not response:
+            response = self.twitch_gql(TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel,
+                                       {"channel": streamer.username})
 
-    def check_streamer_online(self, streamer):
+        if response and not response.get('errors') and response["data"]["user"]["stream"]:
+            stream_info = response["data"]["user"]
+            streamer.stream.update(
+                id=stream_info["stream"]["id"],
+                title=stream_info["broadcastSettings"]["title"],
+                game=GamesMngr()(stream_info["broadcastSettings"]["game"]),
+                tags=stream_info["stream"]["tags"],
+                viewers_count=stream_info["stream"]["viewersCount"],
+            )
+            return True
+        return False
+
+    def force_pull_stream_online_status_info(self, streamer: Streamer, response=None):
+        if self.upd_stream_info(streamer, response):
+            if not streamer.online:
+                self.get_spade_url(streamer)
+        else:
+            streamer.offline()
+
+        if streamer.settings.claim_drops:
+            # Update also the campaigns_ids so we are sure to tracking the correct campaign
+            streamer.stream.campaigns_ids = (self.__get_campaign_ids_from_streamer(streamer))
+
+    def pull_stream_online_status_info(self, streamer: Streamer):
         if time.time() >= streamer.offline_at + 60:
-            try:
-                if not streamer.online:
-                    self.get_spade_url(streamer)
-                self.update_stream(streamer)
-            except StreamerIsOfflineException:
-                streamer.online = False
-            else:
-                if not streamer.online:
-                    streamer.online = True
+            self.force_pull_stream_online_status_info(streamer)
+
+    @staticmethod
+    def get_channel_id_process(response):
+        if "data" in response and "user" in response["data"] and response["data"]["user"]:
+            return response["data"]["user"]["id"]
+        else:
+            raise StreamerDoesNotExistException
 
     def get_channel_id(self, streamer_username) -> Optional[str]:
         # json_data = copy.deepcopy(GQLOperations.ReportMenuItem)
         # json_data["variables"] = {"channelLogin": streamer_username}
-        json_response = self._twitch_gql(TwitchGQLQuerys.ReportMenuItem, {"channelLogin": streamer_username})
-        if "data" in json_response and "user" in json_response["data"] and json_response["data"]["user"]:
-            return json_response["data"]["user"]["id"]
-        else:
-            raise StreamerDoesNotExistException
+        response = self.twitch_gql(TwitchGQLQuerys.ReportMenuItem, {"channelLogin": streamer_username})
+        return self.get_channel_id_process(response)
 
     def get_followers(self, limit: int = 100, order: FollowersOrder = FollowersOrder.ASC) -> dict:
         # json_data = copy.deepcopy(GQLOperations.ChannelFollows)
@@ -203,7 +197,7 @@ class Twitch(object):
         has_next = True
         follows = {}
         while has_next:
-            json_response = self._twitch_gql(TwitchGQLQuerys.ChannelFollows, variables)
+            json_response = self.twitch_gql(TwitchGQLQuerys.ChannelFollows, variables)
             try:
                 follows_response = json_response["data"]["user"]["follows"]
                 for f in follows_response["edges"]:
@@ -220,7 +214,7 @@ class Twitch(object):
             streamer.raid = raid
             # json_data = copy.deepcopy(GQLOperations.JoinRaid)
             # json_data["variables"] = {"input": {"raidID": raid.raid_id}}
-            self._twitch_gql(TwitchGQLQuerys.JoinRaid, {"input": {"raidID": raid.id}})
+            self.twitch_gql(TwitchGQLQuerys.JoinRaid, {"input": {"raidID": raid.id}})
 
             logger.info(
                 f"Joining raid from {streamer} to {raid.target_streamer}!",
@@ -236,7 +230,7 @@ class Twitch(object):
     def viewer_is_mod(self, streamer):
         # json_data = copy.deepcopy(GQLOperations.ModViewChannelQuery)
         # json_data["variables"] = {"channelLogin": streamer.username}
-        response = self._twitch_gql(TwitchGQLQuerys.ModViewChannelQuery, {"channelLogin": streamer.username})
+        response = self.twitch_gql(TwitchGQLQuerys.ModViewChannelQuery, {"channelLogin": streamer.username})
         try:
             streamer.viewer_is_mod = response["data"]["user"]["self"]["isModerator"]
         except (ValueError, KeyError):
@@ -366,79 +360,80 @@ class Twitch(object):
     def send_minute_watched_events(self, streamers, priority, stream_watching_limit: int = 2, chunk_size=6):
         iteration_timestamp = None
         while self._running:
+            streamers_online = []
+            streamers_watching = []
             try:
-                with streamers as streamers_locked:
-                    streamers_index = []
-                    for index, streamer in streamers_locked.items():
+                with streamers:
+                    for index, streamer in streamers.items():
                         if streamer.online and (streamer.online_at == 0 or (time.time() - streamer.online_at) > 30):
-                            if (streamer.stream.update_elapsed() / 60) > 10:
+                            if streamer.stream.update_elapsed > 600:
                                 # Why this user It's currently online but the last updated was more than 10minutes ago?
                                 # Please perform a manually update and check if the user it's online
-                                self.check_streamer_online(streamer)
-                            streamers_index.append(index)
+                                self.pull_stream_online_status_info(streamer)
 
-                    streamers_watching = []
-                    for prior in priority:
-                        if (length := len(streamers_watching)) >= stream_watching_limit:
-                            break
+                        with streamer:
+                            if streamer.online:
+                                streamers_online.append({'streamer': streamer,
+                                                         'url': streamer.stream.spade_url,
+                                                         'payload': streamer.payload(),
+                                                         'name': str(streamer)})
 
-                        if prior == Priority.ORDER:
-                            # Get the first 2 items, they are already in order
-                            streamers_watching += streamers_index[:stream_watching_limit - length]
+                for prior in priority:
+                    if (length := len(streamers_watching)) >= stream_watching_limit:
+                        break
 
-                        elif (
-                            prior in [Priority.POINTS_ASCENDING,
-                                      Priority.POINTS_DESCEDING]
-                        ):
-                            streamers_watching += sorted(
-                                streamers_index,
-                                key=lambda x: streamers_locked[x].channel_points,
-                                reverse=(
-                                    True if prior == Priority.POINTS_DESCEDING else False
-                                ),
-                            )[:stream_watching_limit - length]
+                    if prior == Priority.ORDER:
+                        # Get the first 2 items, they are already in order
+                        streamers_watching += streamers_online[:stream_watching_limit - length]
 
-                        elif prior == Priority.STREAK:
-                            """
-                            Check if we need need to change priority based on watch streak
-                            Viewers receive points for returning for x consecutive streams.
-                            Each stream must be at least 10 minutes long and it must have been at least 30 minutes since
-                            the last stream ended.
-                            Watch at least 6m for get the +10
-                            """
-                            for index in streamers_index:
-                                streamer = streamers_locked[index]
+                    elif prior in [Priority.POINTS_ASCENDING, Priority.POINTS_DESCEDING]:
+                        streamers_watching += sorted(
+                            streamers_online,
+                            key=lambda x: x['streamer'].channel_points,
+                            reverse=(
+                                True if prior == Priority.POINTS_DESCEDING else False
+                            ),
+                        )[:stream_watching_limit - length]
+
+                    elif prior == Priority.STREAK:
+                        """
+                        Check if we need need to change priority based on watch streak
+                        Viewers receive points for returning for x consecutive streams.
+                        Each stream must be at least 10 minutes long and it must have been at least 30 minutes since
+                        the last stream ended.
+                        Watch at least 6m for get the +10
+                        """
+                        for data in streamers_online:
+                            with data['streamer'] as streamer:
                                 if (
                                     streamer.settings.watch_streak
                                     and streamer.stream.watch_streak_missing
-                                    and (streamer.offline_at == 0
-                                         or ((time.time() - streamer.offline_at) // 60) > 30)
+                                    and (streamer.offline_at == 0 or (time.time() - streamer.offline_at) > 30 * 60)
                                     and streamer.stream.minute_watched < 7  # fix #425
                                 ):
-                                    streamers_watching.append(index)
+                                    streamers_watching.append(data)
                                     if len(streamers_watching) == stream_watching_limit:
                                         break
 
-                        elif prior == Priority.DROPS:
-                            for index in streamers_index:
-                                if streamers_locked[index].drops_condition():
-                                    streamers_watching.append(index)
-                                    if len(streamers_watching) == stream_watching_limit:
-                                        break
+                    elif prior == Priority.DROPS:
+                        for data in streamers_online:
+                            if data['streamer'].drops_condition():
+                                streamers_watching.append(data)
+                                if len(streamers_watching) == stream_watching_limit:
+                                    break
 
-                        elif prior == Priority.SUBSCRIBED:
-                            streamers_with_multiplier = [
-                                index
-                                for index in streamers_index
-                                if streamers_locked[index].viewer_has_points_multiplier()
-                            ]
-                            streamers_with_multiplier = sorted(
-                                streamers_with_multiplier,
-                                key=lambda x: streamers_locked[x].total_points_multiplier(
-                                ),
-                                reverse=True,
-                            )
-                            streamers_watching += streamers_with_multiplier[:stream_watching_limit - length]
+                    elif prior == Priority.SUBSCRIBED:
+                        streamers_with_multiplier = [
+                            data
+                            for data in streamers_online
+                            if data['streamer'].activeMultipliers
+                        ]
+                        streamers_with_multiplier = sorted(
+                            streamers_with_multiplier,
+                            key=lambda x: data['streamer'].total_points_multiplier,
+                            reverse=True,
+                        )
+                        streamers_watching += streamers_with_multiplier[:stream_watching_limit - length]
 
                     """
                     Twitch has a limit - you can't watch more than 2 channels at one time.
@@ -457,12 +452,12 @@ class Twitch(object):
                 streamers_watching = streamers_watching[:stream_watching_limit]
 
                 period = 60 / max(len(streamers_watching), 1)
-                for index in streamers_watching:
-                    with streamers:
-                        streamer = streamers[index]
-                        url = streamer.stream.spade_url
-                        payload = streamer.payload()
-                        streamer = str(streamer)
+                for data in streamers_watching:
+                    # with streamers:
+                    streamer = data['streamer']
+                    url = data['url']
+                    payload = data['payload']
+                    name = data['name']
 
                     payload.update({
                         "player": "site",
@@ -498,65 +493,60 @@ class Twitch(object):
                                                                        'User-Agent': self.user_agent},
                                                                    fields={'data': payload})
                         logger.debug(
-                            f"Send minute watched request for {streamer} - Status code: {response.status}"
+                            f"Send minute watched request for {name} - Status code: {response.status}"
                         )
                         if response.status == 204:
                             iteration_timestamp = time.time()
-                            with streamers as streamers_locked:
-                                if index in streamers_locked:
-                                    streamer = streamers_locked[index]
-                                    streamer.stream.update_minute_watched()
 
-                                    """
-                                    Remember, you can only earn progress towards a time-based Drop on one participating 
-                                    channel at a time.  [ ! ! ! ]
-                                    You can also check your progress towards Drops within a campaign anytime by viewing 
-                                    the Drops Inventory.
-                                    For time-based Drops, if you are unable to claim the Drop in time, you will be able 
-                                    to claim it from the inventory page until the Drops campaign ends.
-                                    """
+                            streamer.stream.update_minute_watched()
 
-                                    for campaign in streamer.stream.campaigns:
-                                        for drop in campaign.drops:
-                                            # We could add .has_preconditions_met condition inside is_printable
-                                            if (
-                                                drop.has_preconditions_met
-                                                and drop.is_printable
-                                            ):
-                                                drop_messages = [
-                                                    f"{streamer} is streaming {streamer.stream}",
-                                                    f"Campaign: {campaign}",
-                                                    f"Drop: {drop}",
-                                                    f"{drop.progress_bar()}",
-                                                ]
-                                                for single_line in drop_messages:
-                                                    logger.info(
-                                                        single_line,
-                                                        extra={
-                                                            "event": Events.DROP_STATUS,
-                                                            "skip_telegram": True,
-                                                            "skip_discord": True,
-                                                            "skip_webhook": True,
-                                                            "skip_matrix": True,
-                                                        },
-                                                    )
+                            """
+                            Remember, you can only earn progress towards a time-based Drop on one participating 
+                            channel at a time.  [ ! ! ! ]
+                            You can also check your progress towards Drops within a campaign anytime by viewing 
+                            the Drops Inventory.
+                            For time-based Drops, if you are unable to claim the Drop in time, you will be able 
+                            to claim it from the inventory page until the Drops campaign ends.
+                            """
+                            with streamer:
+                                for campaign in streamer.stream.campaigns:
+                                    for drop in campaign.drops:
+                                        # We could add .has_preconditions_met condition inside is_printable
+                                        if drop.has_preconditions_met and drop.is_printable:
+                                            drop_messages = [
+                                                f"{streamer} is streaming {streamer.stream}",
+                                                f"Campaign: {campaign}",
+                                                f"Drop: {drop}",
+                                                f"{drop.progress_bar()}",
+                                            ]
+                                            for single_line in drop_messages:
+                                                logger.info(
+                                                    single_line,
+                                                    extra={
+                                                        "event": Events.DROP_STATUS,
+                                                        "skip_telegram": True,
+                                                        "skip_discord": True,
+                                                        "skip_webhook": True,
+                                                        "skip_matrix": True,
+                                                    },
+                                                )
 
-                                                if Settings.logger.telegram:
-                                                    Settings.logger.telegram.send(
-                                                        "\n".join(drop_messages),
-                                                        Events.DROP_STATUS,
-                                                    )
+                                            if Settings.logger.telegram:
+                                                Settings.logger.telegram.send(
+                                                    "\n".join(drop_messages),
+                                                    Events.DROP_STATUS,
+                                                )
 
-                                                if Settings.logger.discord:
-                                                    Settings.logger.discord.send(
-                                                        "\n".join(drop_messages),
-                                                        Events.DROP_STATUS,
-                                                    )
-                                                if Settings.logger.webhook:
-                                                    Settings.logger.webhook.send(
-                                                        "\n".join(drop_messages),
-                                                        Events.DROP_STATUS,
-                                                    )
+                                            if Settings.logger.discord:
+                                                Settings.logger.discord.send(
+                                                    "\n".join(drop_messages),
+                                                    Events.DROP_STATUS,
+                                                )
+                                            if Settings.logger.webhook:
+                                                Settings.logger.webhook.send(
+                                                    "\n".join(drop_messages),
+                                                    Events.DROP_STATUS,
+                                                )
 
                     except urllib3.exceptions.ConnectionError as e:
                         logger.warning(f"Error while trying to send minute watched: {e}")
@@ -566,18 +556,14 @@ class Twitch(object):
                             urllib3.exceptions.ReadTimeoutError):
                         self.__check_connection_handler(chunk_size)
 
-                if not streamers_locked:
-                    self.__chuncked_sleep(60, chunk_size=chunk_size)
+                if not streamers_watching:
+                    self.__chuncked_sleep(30, chunk_size=chunk_size)
             except Exception:
                 logger.error("Exception raised in send minute watched", exc_info=True)
 
     # === CHANNEL POINTS / PREDICTION === #
     # Load the amount of current points for a channel, check if a bonus is available
-    def load_channel_points_context(self, streamer):
-        # json_data = copy.deepcopy(GQLOperations.ChannelPointsContext)
-        # json_data["variables"] = {"channelLogin": streamer.username}
-
-        response = self._twitch_gql(TwitchGQLQuerys.ChannelPointsContext, {"channelLogin": streamer.username})
+    def load_channel_points_process(self, streamer: Streamer, response):
         if response:
             if response["data"]["community"]:
                 channel = response["data"]["community"]["channel"]
@@ -590,6 +576,13 @@ class Twitch(object):
                     self.claim_bonus(streamer, community_points["availableClaim"]["id"])
             else:
                 raise StreamerDoesNotExistException
+
+    def load_channel_points_context(self, streamer: Streamer):
+        # json_data = copy.deepcopy(GQLOperations.ChannelPointsContext)
+        # json_data["variables"] = {"channelLogin": streamer.username}
+
+        response = self.twitch_gql(TwitchGQLQuerys.ChannelPointsContext, {"channelLogin": streamer.username})
+        self.load_channel_points_process(streamer, response)
 
     def make_predictions(self, event):
         decision = event.bet.calculate(event.streamer.channel_points)
@@ -643,7 +636,7 @@ class Twitch(object):
                     #         "transactionID": token_hex(16),
                     #     }
                     # }
-                    response = self._twitch_gql(TwitchGQLQuerys.MakePrediction, {
+                    response = self.twitch_gql(TwitchGQLQuerys.MakePrediction, {
                         "input": {
                             "eventID": event.event_id,
                             "outcomeID": decision["id"],
@@ -694,7 +687,7 @@ class Twitch(object):
         # json_data["variables"] = {
         #     "input": {"channelID": streamer.channel_id, "claimID": claim_id}
         # }
-        self._twitch_gql(TwitchGQLQuerys.ClaimCommunityPoints, {
+        self.twitch_gql(TwitchGQLQuerys.ClaimCommunityPoints, {
             "input": {"channelID": streamer.channel_id, "claimID": claim_id}
         })
 
@@ -711,15 +704,15 @@ class Twitch(object):
         # json_data["variables"] = {
         #     "input": {"momentID": moment_id}
         # }
-        self._twitch_gql(TwitchGQLQuerys.CommunityMomentCallout_Claim, {"input": {"momentID": moment_id}})
+        self.twitch_gql(TwitchGQLQuerys.CommunityMomentCallout_Claim, {"input": {"momentID": moment_id}})
 
     # === CAMPAIGNS / DROPS / INVENTORY === #
-    def __get_campaign_ids_from_streamer(self, streamer):
+    def __get_campaign_ids_from_streamer(self, streamer: Streamer):
         # json_data = copy.deepcopy(
         #     GQLOperations.DropsHighlightService_AvailableDrops)
         # json_data["variables"] = {"channelID": streamer.channel_id}
-        response = self._twitch_gql(TwitchGQLQuerys.DropsHighlightService_AvailableDrops,
-                                    {"channelID": streamer.channel_id})
+        response = self.twitch_gql(TwitchGQLQuerys.DropsHighlightService_AvailableDrops,
+                                   {"channelID": streamer.channel_id})
         try:
             return (
                 []
@@ -734,7 +727,7 @@ class Twitch(object):
 
     def __get_inventory(self):
         # response = self.post_gql_request(GQLOperations.Inventory)
-        response = self._twitch_gql(TwitchGQLQuerys.Inventory)
+        response = self.twitch_gql(TwitchGQLQuerys.Inventory)
         try:
             return response["data"]["currentUser"]["inventory"] if response else {}
         except (ValueError, KeyError, TypeError):
@@ -742,7 +735,7 @@ class Twitch(object):
 
     def __get_drops_dashboard(self, status=None):
         # response = self.post_gql_request(GQLOperations.ViewerDropsDashboard)
-        response = self._twitch_gql(TwitchGQLQuerys.ViewerDropsDashboard)
+        response = self.twitch_gql(TwitchGQLQuerys.ViewerDropsDashboard)
         campaigns = response["data"]["currentUser"]["dropCampaigns"] or []
 
         if status:
@@ -765,7 +758,7 @@ class Twitch(object):
                     "channelLogin": f"{self.twitch_login.get_user_id()}",
                 }
 
-            for _, r in self._twitch_gql(json_data).items():
+            for _, r in self.twitch_gql(json_data).items():
                 if r["data"]["user"]:
                     result.append(r["data"]["user"]["dropCampaign"])
         return result
@@ -797,8 +790,8 @@ class Twitch(object):
         # json_data = copy.deepcopy(GQLOperations.DropsPage_ClaimDropRewards)
         # json_data["variables"] = {
         #     "input": {"dropInstanceID": drop.drop_instance_id}}
-        response = self._twitch_gql(TwitchGQLQuerys.DropsPage_ClaimDropRewards,
-                                    {"input": {"dropInstanceID": drop.drop_instance_id}})
+        response = self.twitch_gql(TwitchGQLQuerys.DropsPage_ClaimDropRewards,
+                                   {"input": {"dropInstanceID": drop.drop_instance_id}})
         try:
             # response["data"]["claimDropRewards"] can be null and respose["data"]["errors"] != []
             # or response["data"]["claimDropRewards"]["status"] === DROP_INSTANCE_ALREADY_CLAIMED

@@ -4,6 +4,7 @@ import time
 from base64 import b64encode
 from typing import Union, Optional
 
+
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.constants import DROP_ID
 from TwitchChannelPointsMiner.classes.entities.Game import Game
@@ -18,12 +19,12 @@ class Stream(LockedObject):
         "_title",
         "game",
         "tags",
+        "stream_up",
         "drops_tags",
         "campaigns",
         "campaigns_ids",
         "viewers_count",
-        "spade_url",
-        # "payload",
+        "_spade_url",
         "watch_streak_missing",
         "minute_watched",
         "_last_update",
@@ -42,11 +43,12 @@ class Stream(LockedObject):
         self.campaigns = []
         self.campaigns_ids = []
 
+        self.stream_up = 0
+
         self.viewers_count: int = 0
         self._last_update: float = 0
 
-        self.spade_url: Optional[str] = None
-        # self.payload = {}
+        self._spade_url: Optional[str] = None
 
         self.init_watch_streak()
 
@@ -80,10 +82,13 @@ class Stream(LockedObject):
         else:
             self._title = None
 
-    # def encode_payload(self) -> dict:
-        # json_event = json.dumps(self.payload, separators=(",", ":"))
-        # return (b64encode(json_event.encode("utf-8"))).decode("utf-8")
-        # return self.payload
+    @property
+    def online(self) -> bool:
+        return bool(self._spade_url)
+
+    @property
+    def spade_url(self) -> Optional[str]:
+        return self._spade_url
 
     def update(self, id: Optional[Union[int, str]], title: Optional[str],
                game: Game, tags, viewers_count: Union[str, int]):
@@ -115,19 +120,23 @@ class Stream(LockedObject):
             else ", ".join([tag["localizedName"] for tag in self.tags])
         )
 
-    def update_required(self):
-        return self._last_update == 0 or self.update_elapsed() >= 120
+    @property
+    def stream_up_elapsed(self):
+        return time.time() - self.stream_up
 
+    @property
     def update_elapsed(self):
-        return 0 if self._last_update == 0 else (time.time() - self._last_update)
+        last_upd = self._last_update
+        return 0 if last_upd == 0 else (time.time() - last_upd)
 
     def init_watch_streak(self):
-        self.watch_streak_missing = True
-        self.minute_watched = 0
-        self._minute_watched_timestamp = 0
+        with self:
+            self.watch_streak_missing = True
+            self.minute_watched = 0
+            self._minute_watched_timestamp = 0
 
     def update_minute_watched(self):
-        if self._minute_watched_timestamp != 0:
-            self.minute_watched += round(
-                (time.time() - self._minute_watched_timestamp) / 60, 5)
-        self._minute_watched_timestamp = time.time()
+        with self:
+            if self._minute_watched_timestamp:
+                self.minute_watched += round((time.time() - self._minute_watched_timestamp) / 60, 5)
+            self._minute_watched_timestamp = time.time()

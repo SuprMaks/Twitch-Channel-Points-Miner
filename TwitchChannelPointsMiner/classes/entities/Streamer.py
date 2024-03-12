@@ -4,7 +4,9 @@ import os
 import time
 from datetime import datetime
 from plum import dispatch
-from typing import Union
+from typing import Union, Optional
+from locked_dict.locked_dict import LockedDict
+
 
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, DelayMode
@@ -74,17 +76,15 @@ class Streamer(LockedObject):
         "_display_name",
         "settings",
 
-        "_online",
-        "stream_up",
+        # "_online",
         "online_at",
         "offline_at",
+        "irc_chat",
 
         "start_channel_points",
         "channel_points",
-        "minute_watched_requests",
         "viewer_is_mod",
         "activeMultipliers",
-        "irc_chat",
         "stream",
         "raid",
         "history",
@@ -97,13 +97,11 @@ class Streamer(LockedObject):
         self._display_name: str = ''
         self._channel_id: int = 0
         self.settings = settings
-        self._online = False
-        self.stream_up = 0
+        # self._online = False
         self.online_at = 0
         self.offline_at = 0
         self.start_channel_points: int = 0
         self.channel_points: int = 0
-        self.minute_watched_requests = None
         self.viewer_is_mod = False
         self.activeMultipliers = None
         self.irc_chat = None
@@ -111,7 +109,7 @@ class Streamer(LockedObject):
         self.stream = Stream()
 
         self.raid = None
-        self.history = {}
+        self.history = LockedDict()
 
     @dispatch
     def __init__(self, username: str, display_name: str = '', settings: StreamerSettings = StreamerSettings()):
@@ -183,29 +181,55 @@ class Streamer(LockedObject):
 
     @property
     def online(self) -> bool:
-        return self._online
+        return self.stream.online
 
-    @online.setter
-    def online(self, d: bool):
-        if d is not self._online:
-            if d:
-                self.online_at = time.time()
-                self.stream.init_watch_streak()
-            else:
-                self.offline_at = time.time()
+    def offline(self):
+        self.stream_spade_url = None
 
-            self._online = d
+    def stream_spade_url(self, url: Optional[str]):
+        with self.stream, self:
+            self.stream._spade_url = url
+            if url is not (online:=self.online):
+                if url:
+                    self.online_at = time.time()
+                    self.stream.init_watch_streak()
+                else:
+                    self.offline_at = time.time()
 
         self.toggle_chat()
 
         logger.info(
-            f"{self} is {'Online' if self._online else 'Offline'}!",
+            f"{self} is {'Online' if online else 'Offline'}!",
             extra={
-                "emoji": ":partying_face:" if self._online else ":sleeping:",
-                "event": Events.STREAMER_ONLINE if self._online else Events.STREAMER_OFFLINE,
+                "emoji": ":partying_face:" if online else ":sleeping:",
+                "event": Events.STREAMER_ONLINE if online else Events.STREAMER_OFFLINE,
                 "links": {self.printable_display_name: self.streamer_url}
             },
         )
+
+    stream_spade_url = property(None, stream_spade_url)
+
+    # @online.setter
+    # def online(self, d: bool):
+    #     if d is not self._online:
+    #         if d:
+    #             self.online_at = time.time()
+    #             self.stream.init_watch_streak()
+    #         else:
+    #             self.offline_at = time.time()
+    #
+    #         self._online = d
+    #
+    #     self.toggle_chat()
+    #
+    #     logger.info(
+    #         f"{self} is {'Online' if self._online else 'Offline'}!",
+    #         extra={
+    #             "emoji": ":partying_face:" if self._online else ":sleeping:",
+    #             "event": Events.STREAMER_ONLINE if self._online else Events.STREAMER_OFFLINE,
+    #             "links": {self.printable_display_name: self.streamer_url}
+    #         },
+    #     )
 
     @property
     def channel_points_printable(self) -> str:
@@ -222,48 +246,47 @@ class Streamer(LockedObject):
         return f"{'+' if diff > 0 else ''}{_millify(diff)}"
 
     def print_history(self):
-        return ", ".join(
-            [
-                f"{key}({self.history[key]['counter']} times, {_millify(self.history[key]['amount'])} gained)"
-                for key in sorted(self.history)
-                if self.history[key]["counter"] != 0
-            ]
-        )
+        with self.history:
+            return ", ".join(
+                [
+                    f"{key}({self.history[key]['counter']} times, {_millify(self.history[key]['amount'])} gained)"
+                    for key in sorted(self.history)
+                    if self.history[key]["counter"] != 0
+                ]
+            )
 
     def update_history(self, reason_code, earned, counter=1):
-        if reason_code not in self.history:
-            self.history[reason_code] = {"counter": 0, "amount": 0}
-        self.history[reason_code]["counter"] += counter
-        self.history[reason_code]["amount"] += earned
+        with self.history:
+            if reason_code not in self.history:
+                self.history[reason_code] = {"counter": 0, "amount": 0}
+            self.history[reason_code]["counter"] += counter
+            self.history[reason_code]["amount"] += earned
 
         if reason_code == "WATCH_STREAK":
             self.stream.watch_streak_missing = False
 
-    def stream_up_elapsed(self):
-        return self.stream_up == 0 or ((time.time() - self.stream_up) > 120)
-
     def drops_condition(self):
-        return (
-            self.settings.claim_drops
-            and self.online
-            # and self.stream.drops_tags is True
-            and self.stream.campaigns_ids
-        )
-
-    def viewer_has_points_multiplier(self):
-        return self.activeMultipliers is not None and len(self.activeMultipliers) > 0
-
-    def total_points_multiplier(self):
-        return (
-            sum(
-                map(
-                    lambda x: x["factor"],
-                    self.activeMultipliers,
-                ),
+        with self:
+            return (
+                self.settings.claim_drops
+                and self.online
+                # and self.stream.drops_tags is True
+                and self.stream.campaigns_ids
             )
-            if self.activeMultipliers is not None
-            else 0
-        )
+
+    @property
+    def total_points_multiplier(self):
+        with self:
+            return (
+                sum(
+                    map(
+                        lambda x: x["factor"],
+                        self.activeMultipliers,
+                    ),
+                )
+                if self.activeMultipliers is not None
+                else 0
+            )
 
     def get_prediction_window(self, prediction_window_seconds):
         delay_mode = self.settings.bet.delay_mode

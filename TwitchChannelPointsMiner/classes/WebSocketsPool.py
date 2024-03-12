@@ -16,7 +16,7 @@ from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.classes.entities.StreamerStorage import StreamerStorage
 from TwitchChannelPointsMiner.constants import WEBSOCKET
-from TwitchChannelPointsMiner.utils import internet_connection_available
+from TwitchChannelPointsMiner.utils import internet_connection_available, float_round
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,39 @@ class WebSocketsPool:
         self.twitch = twitch
         self.streamers = streamers
         self.events_predictions = events_predictions
+        Thread(name='WebSocketsPool_watchdog', target=self._watchdog, daemon=True).start()
+        Thread(name='WebSocketsPool_ping/pong(er)', target=self._pingponger, daemon=True).start()
+
+    def _pingponger(self):
+        while True:
+            delay_sum = 0
+            for index, ws in enumerate(self.ws):
+                if ws:
+                    while delay_sum < (target_delay:=30 / len(self.ws)):
+                        time.sleep((chunk:=target_delay / 4))
+                        delay_sum += chunk
+                    if ws:
+                        ws.send({"type": "PING"})
+                        ws.last_ping_tm = time.time()
+                    delay_sum = 0
+
+    def _watchdog(self):
+        while True:
+            time.sleep(random.uniform(20, 60))
+            # Do an external control for WebSocket. Check if the thread is running
+            # Check if is not None because maybe we have already created a new connection on array+1
+            # and now index is None
+            if internet_connection_available():
+                for index, ws in enumerate(self.ws):
+                    if not ws.is_reconnecting and ws.elapsed_last_ping > 2:
+                        logger.info(
+                            f"#{index} - The last PING was sent more than 10 minutes ago. "
+                            "Reconnecting to the WebSocket..."
+                        )
+                        self.handle_reconnection(ws)
+                    elif ws.elapsed_last_pong > 2:
+                        logger.info(f"#{ws.index} - The last PONG was received more than 5 minutes ago")
+                        self.handle_reconnection(ws)
 
     """
     API Limits
@@ -41,7 +74,7 @@ class WebSocketsPool:
 
     def submit(self, topic):
         # Check if we need to create a new WebSocket instance
-        if self.ws == [] or len(self.ws[-1].topics) >= 50:
+        if not self.ws or len(self.ws[-1].topics) >= 50:
             self.ws.append(self.__new(len(self.ws)))
             self.__start(-1)
 
@@ -52,10 +85,10 @@ class WebSocketsPool:
         if topic not in self.ws[index].topics:
             self.ws[index].topics.append(topic)
 
-        if self.ws[index].is_opened is False:
-            self.ws[index].pending_topics.append(topic)
-        else:
+        if self.ws[index]:
             self.ws[index].listen(topic, self.twitch.twitch_login.get_auth_token())
+        else:
+            self.ws[index].pending_topics.append(topic)
 
     def unsubscribe(self, topic):
         for index, ws in enumerate(self.ws):
@@ -81,20 +114,8 @@ class WebSocketsPool:
         )
 
     def __start(self, index):
-        if Settings.disable_ssl_cert_verification is True:
-            import ssl
-
-            thread_ws = Thread(
-                target=lambda: self.ws[index].run_forever(
-                    sslopt={"cert_reqs": ssl.CERT_NONE}
-                )
-            )
-            logger.warning("SSL certificate verification is disabled! Be aware!")
-        else:
-            thread_ws = Thread(target=lambda: self.ws[index].run_forever())
-        thread_ws.daemon = True
-        thread_ws.name = f"WebSocket #{self.ws[index].index}"
-        thread_ws.start()
+        if self.ws:
+            self.ws[index].start()
 
     def end(self):
         for index in range(0, len(self.ws)):
@@ -103,35 +124,11 @@ class WebSocketsPool:
 
     @staticmethod
     def on_open(ws):
-        def run():
-            ws.is_opened = True
-            ws.ping()
-
-            while ws.pending_topics:
-                topic = ws.pending_topics.pop(0)
-                ws.listen(topic, ws.twitch.twitch_login.get_auth_token())
-                if topic not in ws.topics:
-                    ws.topics.append(topic)
-
-            while ws.is_closed is False:
-                # Else: the ws is currently in reconnecting phase, you can't do ping or other operation.
-                # Probably this ws will be closed very soon with ws.is_closed = True
-                if ws.is_reconnecting is False:
-                    ws.ping()  # We need ping for keep the connection alive
-                    for _ in range(1, int(random.uniform(25, 30) // 5)):
-                        if ws.is_closed:
-                            break
-                        time.sleep(5)
-
-                    if ws.elapsed_last_pong() > 5:
-                        logger.info(
-                            f"#{ws.index} - The last PONG was received more than 5 minutes ago"
-                        )
-                        WebSocketsPool.handle_reconnection(ws)
-
-        thread_ws = Thread(target=run)
-        thread_ws.daemon = True
-        thread_ws.start()
+        while ws.pending_topics:
+            topic = ws.pending_topics.pop(0)
+            ws.listen(topic, ws.twitch.twitch_login.get_auth_token())
+            if topic not in ws.topics:
+                ws.topics.append(topic)
 
     @staticmethod
     def on_error(ws, error):
@@ -150,7 +147,6 @@ class WebSocketsPool:
         # Reconnect only if ws.is_reconnecting is False to prevent more than 1 ws from being created
         if ws.is_reconnecting is False:
             # Close the current WebSocket.
-            ws.is_closed = True
             ws.keep_running = False
             # Reconnect only if ws.forced_close is False (replace the keep_running)
 
@@ -181,6 +177,7 @@ class WebSocketsPool:
 
                 for topic in ws.topics:
                     self.__submit(ws.index, topic)
+            ws.is_reconnecting = False
 
     @staticmethod
     def on_message(ws, message):
@@ -194,8 +191,8 @@ class WebSocketsPool:
             # If we have more than one PubSub connection, messages may be duplicated
             # Check the concatenation between message_type.top.channel_id
             if (
-                ws.last_message_type_channel is not None
-                and ws.last_message_timestamp is not None
+                ws.last_message_type_channel
+                and ws.last_message_timestamp
                 and ws.last_message_timestamp == message.timestamp
                 and ws.last_message_type_channel == message.identifier
             ):
@@ -249,14 +246,14 @@ class WebSocketsPool:
                     elif message.topic == "video-playback-by-id":
                         # There is stream-up message type, but it's sent earlier than the API updates
                         if message.type == "stream-up":
-                            streamer.stream_up = time.time()
+                            streamer.stream.stream_up = time.time()
                         elif message.type == "stream-down":
-                            streamer.online = False
+                            streamer.offline()
                         elif message.type == "viewcount":
                             if 'viewers' in message.message:
                                 streamer.stream.viewers_count = message.message['viewers']
-                            if streamer.stream_up_elapsed():
-                                ws.twitch.check_streamer_online(streamer)
+                            if streamer.stream.stream_up == 0 or streamer.stream.stream_up_elapsed > 120:
+                                ws.twitch.pull_stream_online_status_info(streamer)
 
                     elif message.topic == "raid":
                         if message.type == "raid_update_v2":
@@ -281,12 +278,7 @@ class WebSocketsPool:
                         event_id = event_dict["id"]
                         event_status = event_dict["status"]
 
-                        current_tmsp = parser.parse(message.timestamp)
-
-                        if (
-                            message.type == "event-created"
-                            and event_id not in ws.events_predictions
-                        ):
+                        if message.type == "event-created" and event_id not in ws.events_predictions:
                             if event_status == "ACTIVE":
                                 prediction_window_seconds = float(
                                     event_dict["prediction_window_seconds"]
@@ -302,27 +294,20 @@ class WebSocketsPool:
                                     event_status,
                                     event_dict["outcomes"],
                                 )
-                                if (
-                                    streamer.online
-                                    and event.closing_bet_after(current_tmsp) > 0
-                                ):
-                                    bet_settings = streamer.settings.bet
-                                    if (
-                                        bet_settings.minimum_points is None
-                                        or streamer.channel_points
-                                        > bet_settings.minimum_points
-                                    ):
+                                if event.closing_bet_after > 0:
+                                    minimum_points = streamer.settings.bet.minimum_points
+                                    if not minimum_points or streamer.channel_points > minimum_points:
                                         ws.events_predictions[event_id] = event
-                                        start_after = event.closing_bet_after(
-                                            current_tmsp
-                                        )
 
                                         place_bet_thread = Timer(
-                                            start_after,
+                                            0,
                                             ws.twitch.make_predictions,
                                             (ws.events_predictions[event_id],),
                                         )
                                         place_bet_thread.daemon = True
+                                        place_bet_thread.interval = \
+                                            start_after = max(float_round(event.closing_bet_after_raw -
+                                                                          message.server_timestamp_diff, 0))
                                         place_bet_thread.start()
 
                                         logger.info(
@@ -340,7 +325,7 @@ class WebSocketsPool:
                                     else:
                                         logger.info(
                                             f"{streamer} have only {streamer.channel_points} "
-                                            f"channel points and the minimum for bet is: {bet_settings.minimum_points}",
+                                            f"channel points and the minimum for bet is: {minimum_points}",
                                             extra={
                                                 "emoji": ":pushpin:",
                                                 "event": Events.BET_FILTERS,
@@ -391,9 +376,7 @@ class WebSocketsPool:
                                     },
                                 )
 
-                                streamer.update_history(
-                                    "PREDICTION", points["gained"]
-                                )
+                                streamer.update_history("PREDICTION", points["gained"])
 
                                 # Remove duplicate history records from previous message sent
                                 # in community-points-user-v1
@@ -412,7 +395,7 @@ class WebSocketsPool:
 
                                 if event_prediction.result["type"]:
                                     # Analytics switch
-                                    if Settings.enable_analytics is True:
+                                    if Settings.enable_analytics:
                                         streamer.persistent_annotations(
                                             event_prediction.result["type"],
                                             f"{ws.events_predictions[event_id].title}",
@@ -420,12 +403,13 @@ class WebSocketsPool:
                             elif message.type == "prediction-made":
                                 event_prediction.bet_confirmed = True
                                 # Analytics switch
-                                if Settings.enable_analytics is True:
+                                if Settings.enable_analytics:
                                     streamer.persistent_annotations(
                                         "PREDICTION_MADE",
                                         f"Decision: {event_prediction.bet.decision['choice']} - "
                                         f"{event_prediction.title}",
                                     )
+
                 except Exception:
                     logger.error(
                         f"Exception raised for topic: {message.topic} and message: {message}",
@@ -459,4 +443,4 @@ class WebSocketsPool:
             WebSocketsPool.handle_reconnection(ws)
 
         elif response["type"] == "PONG":
-            ws.last_pong = time.time()
+            ws.last_pong_tm = time.time()

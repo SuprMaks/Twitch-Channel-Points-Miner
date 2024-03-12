@@ -41,15 +41,19 @@ GITHUB_url = (
 RETRY_STRATEGY = urllib3.util.Retry(
     total=5,
     connect=3,
-    redirect=3,  # raise_on_redirect=False,
+    redirect=3,
+    # raise_on_redirect=False,
     status=3,
-    #other=5,
+    # other=5,
+    respect_retry_after_header=True,
+    backoff_factor=2)
 
-    backoff_factor=2,
-    # status_forcelist=[429, 500, 502, 503, 504],
-)
 # urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-TWITCH_POOL = urllib3.PoolManager(retries=RETRY_STRATEGY, timeout=urllib3.Timeout(total=5), num_pools=10, maxsize=10, block=True)
+TWITCH_POOL = urllib3.PoolManager(retries=RETRY_STRATEGY,
+                                  timeout=urllib3.Timeout(total=5),
+                                  num_pools=10,
+                                  maxsize=10,
+                                  block=True)
 
 
 class GQLConst(str, Enum):

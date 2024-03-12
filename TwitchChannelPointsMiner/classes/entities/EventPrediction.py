@@ -1,3 +1,5 @@
+from time import time
+
 from TwitchChannelPointsMiner.classes.entities.Bet import Bet
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.classes.Settings import Settings
@@ -53,11 +55,21 @@ class EventPrediction(object):
             else self.__repr__()
         )
 
-    def elapsed(self, timestamp):
-        return float_round((timestamp - self.created_at).total_seconds())
+    @property
+    def elapsed_raw(self):
+        return (time() - self.created_at).total_seconds()
 
-    def closing_bet_after(self, timestamp):
-        return float_round(self.prediction_window_seconds - self.elapsed(timestamp))
+    @property
+    def elapsed(self):
+        return float_round(self.elapsed_raw)
+
+    @property
+    def closing_bet_after_raw(self):
+        return self.prediction_window_seconds - self.elapsed_raw
+
+    @property
+    def closing_bet_after(self):
+        return float_round(self.closing_bet_after_raw)
 
     def print_recap(self) -> str:
         return f"{self}\n\t\t{self.bet}\n\t\tResult: {self.result['string']}"
