@@ -8,6 +8,7 @@ from threading import Thread, Timer
 
 from dateutil import parser
 
+from TwitchChannelPointsMiner.classes.TwitchGQLQuery import TwitchGQLQuerys, TwitchGQLQuery
 from TwitchChannelPointsMiner.classes.entities.EventPrediction import EventPrediction
 from TwitchChannelPointsMiner.classes.entities.Message import Message
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
@@ -22,15 +23,17 @@ logger = logging.getLogger(__name__)
 
 
 class WebSocketsPool:
-    __slots__ = ["ws", "twitch", "streamers", "events_predictions"]
+    __slots__ = ["ws", "twitch", "streamers", "events_predictions", "request_queue"]
 
     def __init__(self, twitch, streamers, events_predictions):
         self.ws = []
         self.twitch = twitch
         self.streamers = streamers
         self.events_predictions = events_predictions
+        self.request_queue = []
         Thread(name='WebSocketsPool_watchdog', target=self._watchdog, daemon=True).start()
         Thread(name='WebSocketsPool_ping/pong(er)', target=self._pingponger, daemon=True).start()
+        Thread(name='WebSocketsPool_request_processor', target=self._request_processor, daemon=True).start()
 
     def _pingponger(self):
         while True:
@@ -53,15 +56,93 @@ class WebSocketsPool:
             # and now index is None
             if internet_connection_available():
                 for index, ws in enumerate(self.ws):
-                    if not ws.is_reconnecting and ws.elapsed_last_ping > 2:
-                        logger.info(
-                            f"#{index} - The last PING was sent more than 10 minutes ago. "
-                            "Reconnecting to the WebSocket..."
-                        )
-                        self.handle_reconnection(ws)
-                    elif ws.elapsed_last_pong > 2:
-                        logger.info(f"#{ws.index} - The last PONG was received more than 5 minutes ago")
-                        self.handle_reconnection(ws)
+                    if not ws.is_reconnecting:
+                        if ws.elapsed_last_ping > 5:
+                            logger.info(
+                                f"#{index} - The last PING was sent more than 5 minutes ago. "
+                                "Reconnecting to the WebSocket..."
+                            )
+                            self.handle_reconnection(ws)
+                        elif ws.elapsed_last_pong > 3:
+                            logger.info(f"#{ws.index} - The last PONG was received more than 3 minutes ago")
+                            self.handle_reconnection(ws)
+
+    def _request_processor(self):
+        queues = {}
+        while True:
+            # Group queues by operations
+            while self.request_queue:
+                task = self.request_queue.pop(0)
+                if (op:=task['name']) not in queues:
+                    queues[op] = []
+                del task['name']
+                queues[op].append(task)
+
+            if queues:
+                pack = {}
+                query = TwitchGQLQuery()
+                for op, queue in queues.items():
+                    if queue:
+                        task = queue.pop(0)
+                        if op == 'claim_bonus':
+                            pack[TwitchGQLQuerys.ClaimCommunityPoints.name] = task
+                            query(TwitchGQLQuerys.ClaimCommunityPoints,
+                                  {"input": {"channelID": task['streamer'].channel_id, "claimID": task['message_id']}})
+                        elif op == 'update_raid':
+                            # if task['streamer'].raid != task['raid']:
+                            #     task['streamer'].raid = task['raid']
+                            pack[TwitchGQLQuerys.JoinRaid.name] = task
+                            query(TwitchGQLQuerys.JoinRaid,
+                                  {"input": {"raidID": task['raid'].id}})
+                        elif op == 'claim_moment':
+                            pack[TwitchGQLQuerys.CommunityMomentCallout_Claim.name] = task
+                            query(TwitchGQLQuerys.CommunityMomentCallout_Claim,
+                                  {"input": {"momentID": task['moment_id']}})
+                        elif op == 'pull_stream_online_status_info':
+                            pack[TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel.name] = task
+                            query(TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel,
+                                  {"channel": task['streamer'].username})
+
+                if query:
+                    response_pack = self.twitch.twitch_gql_no_internet(query)
+                    if len(query._query) > 1:
+                        logger.info(f"{query.query()}")
+                        logger.info(f"{response_pack}")
+                    if response_pack:
+                        for name, response in response_pack.items():
+                            if e := response.get('errors'):
+                                logger.error(f"TwitchGQL error in response {e}")
+                                continue
+                            if name == TwitchGQLQuerys.ClaimCommunityPoints.name:
+                                if Settings.logger.less is False:
+                                    logger.info(
+                                        f"Claiming the bonus for "
+                                        f"{pack[TwitchGQLQuerys.ClaimCommunityPoints.name]['streamer']}!",
+                                        extra={"emoji": ":gift:", "event": Events.BONUS_CLAIM},
+                                    )
+                            elif name == TwitchGQLQuerys.JoinRaid.name:
+                                logger.info(
+                                    f"Joining raid from {pack[TwitchGQLQuerys.JoinRaid.name]['streamer']} to "
+                                    f"{pack[TwitchGQLQuerys.JoinRaid.name]['raid'].target_streamer}!",
+                                    extra={"emoji": ":performing_arts:",
+                                           "event": Events.JOIN_RAID,
+                                           "links": {
+                                               pack[TwitchGQLQuerys.JoinRaid.name]['streamer'].printable_display_name:
+                                                   pack[TwitchGQLQuerys.JoinRaid.name]['streamer'].streamer_url,
+                                               pack[TwitchGQLQuerys.JoinRaid.name]['raid'].target_streamer.printable_display_name:
+                                                   pack[TwitchGQLQuerys.JoinRaid.name]['raid'].target_streamer.streamer_url
+                                           }
+                                           },
+                                )
+                            elif name == TwitchGQLQuerys.CommunityMomentCallout_Claim.name:
+                                if not Settings.logger.less:
+                                    logger.info(
+                                        f"Claiming the moment for "
+                                        f"{pack[TwitchGQLQuerys.CommunityMomentCallout_Claim.name]['streamer']}!",
+                                        extra={"emoji": ":video_camera:",
+                                               "event": Events.MOMENT_CLAIM},
+                                    )
+            time.sleep(2)
 
     """
     API Limits
@@ -158,14 +239,9 @@ class WebSocketsPool:
                 logger.info(
                     f"#{ws.index} - Reconnecting to Twitch PubSub server in ~60 seconds"
                 )
-                time.sleep(30)
+                # time.sleep(30)
 
-                while internet_connection_available() is False:
-                    random_sleep = random.randint(1, 3)
-                    logger.warning(
-                        f"#{ws.index} - No internet connection available! Retry after {random_sleep}m"
-                    )
-                    time.sleep(random_sleep * 60)
+                ws.twitch.check_connection_handler(10)
 
                 # Why not create a new ws on the same array index? Let's try.
                 self = ws.parent_pool
@@ -201,8 +277,7 @@ class WebSocketsPool:
             ws.last_message_timestamp = message.timestamp
             ws.last_message_type_channel = message.identifier
 
-            streamer_index = int(message.channel_id)
-            if streamer_index in ws.streamers:
+            if (streamer_index:=int(message.channel_id)) in ws.streamers:
                 streamer = ws.streamers[streamer_index]
                 try:
                     if message.topic == "community-points-user-v1":
@@ -238,22 +313,26 @@ class WebSocketsPool:
                                     reason_code, f"+{earned} - {reason_code}"
                                 )
                         elif message.type == "claim-available":
-                            ws.twitch.claim_bonus(
-                                streamer,
-                                message.data["claim"]["id"],
-                            )
+                            ws.request_queue.append({'name': 'claim_bonus',
+                                                     'streamer': streamer,
+                                                     'message_id': message.data["claim"]["id"]})
+                            # ws.twitch.claim_bonus(
+                            #     streamer,
+                            #     message.data["claim"]["id"],
+                            # )
 
                     elif message.topic == "video-playback-by-id":
                         # There is stream-up message type, but it's sent earlier than the API updates
                         if message.type == "stream-up":
-                            streamer.stream.stream_up = time.time()
+                            # streamer.stream.stream_up = time.time()
+                            streamer.stream.online_at = time.time()
                         elif message.type == "stream-down":
                             streamer.offline()
                         elif message.type == "viewcount":
                             if 'viewers' in message.message:
-                                streamer.stream.viewers_count = message.message['viewers']
-                            if streamer.stream.stream_up == 0 or streamer.stream.stream_up_elapsed > 120:
-                                ws.twitch.pull_stream_online_status_info(streamer)
+                                streamer.stream.viewers_count = int(message.message['viewers'])
+                            # if not streamer.stream.stream_up or streamer.stream.stream_up_elapsed > 120:
+                                # ws.twitch.pull_stream_online_status_info(streamer)
 
                     elif message.topic == "raid":
                         if message.type == "raid_update_v2":
@@ -264,13 +343,25 @@ class WebSocketsPool:
                                                            message.message["raid"]["target_login"],
                                                            message.message["raid"]["target_display_name"]))
                             )
-                            ws.twitch.update_raid(streamer, raid)
+                            if streamer.raid != raid:
+                                streamer.raid = raid
+                                ws.request_queue.append({'name': 'update_raid',
+                                                         'streamer': streamer,
+                                                         'raid': raid})
+                            # if streamer.raid != raid:
+                            #     streamer.raid = raid
+                            #     ws.request_queue.append(TwitchGQLQuery(TwitchGQLQuerys.JoinRaid,
+                            #                                            {"input": {"raidID": raid.id}}))
+                            # ws.twitch.update_raid(streamer, raid)
 
                     elif message.topic == "community-moments-channel-v1":
                         if message.type == "active":
-                            ws.twitch.claim_moment(
-                                streamer, message.data["moment_id"]
-                            )
+                            ws.request_queue.append({'name': 'claim_moment',
+                                                     'streamer': streamer,
+                                                     'moment_id': message.data["moment_id"]})
+                            # ws.twitch.claim_moment(
+                            #     streamer, message.data["moment_id"]
+                            # )
 
                     elif message.topic == "predictions-channel-v1":
 
@@ -307,7 +398,7 @@ class WebSocketsPool:
                                         place_bet_thread.daemon = True
                                         place_bet_thread.interval = \
                                             start_after = max(float_round(event.closing_bet_after_raw -
-                                                                          message.server_timestamp_diff, 0))
+                                                                          message.server_timestamp_diff), 0)
                                         place_bet_thread.start()
 
                                         logger.info(
@@ -424,9 +515,8 @@ class WebSocketsPool:
             # Check if the error message indicates an authentication issue (ERR_BADAUTH)
             if "ERR_BADAUTH" in error_message:
                 # Inform the user about the potential outdated cookie file
-                username = ws.twitch.twitch_login.username
                 logger.error(f"Received the ERR_BADAUTH error, most likely you have an outdated cookie file"
-                             f" \"cookies\\{username}.pkl\". Delete this file and try again.")
+                             f" \"cookies\\{ws.twitch.twitch_login.username}.pkl\". Delete this file and try again.")
                 # Attempt to delete the outdated cookie file
                 # try:
                 #     cookie_file_path = os.path.join("cookies", f"{username}.pkl")

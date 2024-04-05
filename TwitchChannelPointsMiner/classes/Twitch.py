@@ -12,6 +12,7 @@ import time
 # from datetime import datetime
 from pathlib import Path
 from secrets import choice, token_hex
+from threading import RLock
 from typing import Optional
 from base64 import b64encode
 import urllib3.request
@@ -37,7 +38,7 @@ from TwitchChannelPointsMiner.constants import (
 )
 from TwitchChannelPointsMiner.classes.entities.GamesMngr import GamesMngr
 from TwitchChannelPointsMiner.classes.TwitchGQL import TwitchGQL
-from TwitchChannelPointsMiner.classes.TwitchGQLQuery import TwitchGQLQuerys
+from TwitchChannelPointsMiner.classes.TwitchGQLQuery import TwitchGQLQuerys, TwitchGQLQuery
 from TwitchChannelPointsMiner.utils import (
     _millify,
     create_chunks,
@@ -60,7 +61,8 @@ class Twitch(object):
         "client_session",
         "client_version",
         "twilight_build_id_pattern",
-        "twitch_gql"
+        "twitch_gql",
+        "_internet_lock"
     ]
 
     def __init__(self, username, user_agent, password=None):
@@ -86,6 +88,18 @@ class Twitch(object):
             "-4[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})\";"
         )
         self.twitch_gql = TwitchGQL(pool=TWITCH_POOL)
+        self._internet_lock = RLock()
+
+    def twitch_gql_no_internet(self, *args, **kwargs):
+        while True:
+            try:
+                return self.twitch_gql(*args, **kwargs)
+            except (urllib3.exceptions.NewConnectionError,
+                    urllib3.exceptions.ConnectionError,
+                    urllib3.exceptions.MaxRetryError,
+                    urllib3.exceptions.ConnectTimeoutError,
+                    urllib3.exceptions.ReadTimeoutError):
+                self.check_connection_handler(6)
 
     def login(self):
         if not os.path.isfile(self.cookies_file):
@@ -103,12 +117,11 @@ class Twitch(object):
             "Client-Version": self.update_client_version(),
             "User-Agent": self.user_agent,
             "X-Device-Id": self.device_id,
+            "Connection": "keep-alive",
         }
 
     # === STREAMER / STREAM / INFO === #
-
-    @staticmethod
-    def get_spade_url(streamer: Streamer):
+    def get_spade_url(self, streamer: Streamer):
         # fixes AttributeError: 'NoneType' object has no attribute 'group'
         # headers = {"User-Agent": self.user_agent}
         headers = {"User-Agent": USER_AGENTS["Linux"]["FIREFOX"]}
@@ -132,6 +145,13 @@ class Twitch(object):
             get_spd_url(get_st_url())
         except urllib3.exceptions.RequestError as e:
             logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
+        except (urllib3.exceptions.NewConnectionError,
+                urllib3.exceptions.ConnectionError,
+                urllib3.exceptions.MaxRetryError,
+                urllib3.exceptions.ConnectTimeoutError,
+                urllib3.exceptions.ReadTimeoutError):
+            # logger.error(f"No internet connection or server not responding")
+            self.check_connection_handler(6)
 
     # def get_broadcast_id(self, streamer):
     #     # json_data = copy.deepcopy(GQLOperations.WithIsStreamLiveQuery)
@@ -144,12 +164,9 @@ class Twitch(object):
     #         return stream["id"]
 
     def upd_stream_info(self, streamer: Streamer, response=None) -> bool:
-        # json_data = copy.deepcopy(
-        #     GQLOperations.VideoPlayerStreamInfoOverlayChannel)
-        # json_data["variables"] = {"channel": streamer.username}
         if not response:
-            response = self.twitch_gql(TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel,
-                                       {"channel": streamer.username})
+            response = self.twitch_gql_no_internet(TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel,
+                                                   {"channel": streamer.username})
 
         if response and not response.get('errors') and response["data"]["user"]["stream"]:
             stream_info = response["data"]["user"]
@@ -163,41 +180,50 @@ class Twitch(object):
             return True
         return False
 
-    def force_pull_stream_online_status_info(self, streamer: Streamer, response=None):
-        if self.upd_stream_info(streamer, response):
-            if not streamer.online:
-                self.get_spade_url(streamer)
-        else:
-            streamer.offline()
+    def pull_stream_online_status_info(self, streamer: Streamer, response: Optional[dict] = None):
+        if not response:
+            query = TwitchGQLQuery()
+            if streamer.settings.claim_drops and int(streamer.channel_id):
+                query(TwitchGQLQuerys.DropsHighlightService_AvailableDrops, {"channelID": streamer.channel_id})
+            response = self.twitch_gql_no_internet(query(TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel,
+                                                   {"channel": streamer.username}))
+        elif (streamer.settings.claim_drops and
+              int(streamer.channel_id) and
+              TwitchGQLQuerys.DropsHighlightService_AvailableDrops.name not in response):
+            response[TwitchGQLQuerys.DropsHighlightService_AvailableDrops.name] =\
+                self.twitch_gql_no_internet(TwitchGQLQuerys.DropsHighlightService_AvailableDrops,
+                                            {"channelID": streamer.channel_id})
 
-        if streamer.settings.claim_drops:
+        if TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel.name in response:
+            if self.upd_stream_info(streamer, response[TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel.name]):
+                if not streamer.online:
+                    self.get_spade_url(streamer)
+            else:
+                streamer.offline()
+
+        if streamer.settings.claim_drops and TwitchGQLQuerys.DropsHighlightService_AvailableDrops.name in response:
             # Update also the campaigns_ids so we are sure to tracking the correct campaign
-            streamer.stream.campaigns_ids = (self.__get_campaign_ids_from_streamer(streamer))
-
-    def pull_stream_online_status_info(self, streamer: Streamer):
-        if time.time() >= streamer.offline_at + 60:
-            self.force_pull_stream_online_status_info(streamer)
+            streamer.stream.campaigns_ids = (
+                self.__get_campaign_ids_from_streamer(streamer,
+                                                      response[TwitchGQLQuerys.DropsHighlightService_AvailableDrops.name]))
 
     @staticmethod
-    def get_channel_id_process(response):
+    def channel_id_process(response):
         if "data" in response and "user" in response["data"] and response["data"]["user"]:
             return response["data"]["user"]["id"]
         else:
             raise StreamerDoesNotExistException
 
     def get_channel_id(self, streamer_username) -> Optional[str]:
-        # json_data = copy.deepcopy(GQLOperations.ReportMenuItem)
-        # json_data["variables"] = {"channelLogin": streamer_username}
-        response = self.twitch_gql(TwitchGQLQuerys.ReportMenuItem, {"channelLogin": streamer_username})
-        return self.get_channel_id_process(response)
+        return self.channel_id_process(self.twitch_gql(TwitchGQLQuerys.ReportMenuItem,
+                                                       {"channelLogin": streamer_username}))
 
     def get_followers(self, limit: int = 100, order: FollowersOrder = FollowersOrder.ASC) -> dict:
-        # json_data = copy.deepcopy(GQLOperations.ChannelFollows)
         variables = {"limit": limit, "order": str(order)}
         has_next = True
         follows = {}
         while has_next:
-            json_response = self.twitch_gql(TwitchGQLQuerys.ChannelFollows, variables)
+            json_response = self.twitch_gql_no_internet(TwitchGQLQuerys.ChannelFollows, variables)
             try:
                 follows_response = json_response["data"]["user"]["follows"]
                 for f in follows_response["edges"]:
@@ -212,8 +238,7 @@ class Twitch(object):
     def update_raid(self, streamer, raid):
         if streamer.raid != raid:
             streamer.raid = raid
-            # json_data = copy.deepcopy(GQLOperations.JoinRaid)
-            # json_data["variables"] = {"input": {"raidID": raid.raid_id}}
+
             self.twitch_gql(TwitchGQLQuerys.JoinRaid, {"input": {"raidID": raid.id}})
 
             logger.info(
@@ -228,9 +253,8 @@ class Twitch(object):
             )
 
     def viewer_is_mod(self, streamer):
-        # json_data = copy.deepcopy(GQLOperations.ModViewChannelQuery)
-        # json_data["variables"] = {"channelLogin": streamer.username}
         response = self.twitch_gql(TwitchGQLQuerys.ModViewChannelQuery, {"channelLogin": streamer.username})
+
         try:
             streamer.viewer_is_mod = response["data"]["user"]["self"]["isModerator"]
         except (ValueError, KeyError):
@@ -245,15 +269,18 @@ class Twitch(object):
             if not self._running:
                 break
 
-    def __check_connection_handler(self, chunk_size):
+    def check_connection_handler(self, chunk_size):
         # The success rate It's very hight usually. Why we have failed?
         # Check internet connection ...
-        while not internet_connection_available():
-            random_sleep = random.randint(1, 3)
-            logger.warning(
-                f"No internet connection available! Retry after {random_sleep}m"
-            )
-            self.__chuncked_sleep(random_sleep * 60, chunk_size=chunk_size)
+        with self._internet_lock:
+            while not internet_connection_available():
+                random_sleep = 1  # random.randint(1, 3)
+                logger.warning(
+                    f"No internet connection available! Retry after {random_sleep}m"
+                )
+                self.__chuncked_sleep(random_sleep * 60, chunk_size=chunk_size)
+            else:
+                time.sleep(1)
 
     """
     def post_gql_request(self, json_data):
@@ -365,14 +392,8 @@ class Twitch(object):
             try:
                 with streamers:
                     for index, streamer in streamers.items():
-                        if streamer.online and (streamer.online_at == 0 or (time.time() - streamer.online_at) > 30):
-                            if streamer.stream.update_elapsed > 600:
-                                # Why this user It's currently online but the last updated was more than 10minutes ago?
-                                # Please perform a manually update and check if the user it's online
-                                self.pull_stream_online_status_info(streamer)
-
                         with streamer:
-                            if streamer.online:
+                            if streamer.online and (time.time() - streamer.stream.online_at) > 30:
                                 streamers_online.append({'streamer': streamer,
                                                          'url': streamer.stream.spade_url,
                                                          'payload': streamer.payload(),
@@ -408,7 +429,7 @@ class Twitch(object):
                                 if (
                                     streamer.settings.watch_streak
                                     and streamer.stream.watch_streak_missing
-                                    and (streamer.offline_at == 0 or (time.time() - streamer.offline_at) > 30 * 60)
+                                    and (time.time() - streamer.stream.offline_at) > 30 * 60
                                     and streamer.stream.minute_watched < 7  # fix #425
                                 ):
                                     streamers_watching.append(data)
@@ -490,7 +511,8 @@ class Twitch(object):
                                                                    headers={
                                                                        'Accept': '*/*',
                                                                        'Accept-Encoding': 'gzip, deflate',
-                                                                       'User-Agent': self.user_agent},
+                                                                       'User-Agent': self.user_agent,
+                                                                       'Connection': 'keep-alive'},
                                                                    fields={'data': payload})
                         logger.debug(
                             f"Send minute watched request for {name} - Status code: {response.status}"
@@ -554,7 +576,7 @@ class Twitch(object):
                     except (urllib3.exceptions.MaxRetryError,
                             urllib3.exceptions.ConnectTimeoutError,
                             urllib3.exceptions.ReadTimeoutError):
-                        self.__check_connection_handler(chunk_size)
+                        self.check_connection_handler(chunk_size)
 
                 if not streamers_watching:
                     self.__chuncked_sleep(30, chunk_size=chunk_size)
@@ -563,7 +585,11 @@ class Twitch(object):
 
     # === CHANNEL POINTS / PREDICTION === #
     # Load the amount of current points for a channel, check if a bonus is available
-    def load_channel_points_process(self, streamer: Streamer, response):
+    def load_channel_points_context(self, streamer: Streamer, response=None):
+        if not response:
+            response = self.twitch_gql_no_internet(TwitchGQLQuerys.ChannelPointsContext,
+                                                   {"channelLogin": streamer.username})
+
         if response:
             if response["data"]["community"]:
                 channel = response["data"]["community"]["channel"]
@@ -576,13 +602,6 @@ class Twitch(object):
                     self.claim_bonus(streamer, community_points["availableClaim"]["id"])
             else:
                 raise StreamerDoesNotExistException
-
-    def load_channel_points_context(self, streamer: Streamer):
-        # json_data = copy.deepcopy(GQLOperations.ChannelPointsContext)
-        # json_data["variables"] = {"channelLogin": streamer.username}
-
-        response = self.twitch_gql(TwitchGQLQuerys.ChannelPointsContext, {"channelLogin": streamer.username})
-        self.load_channel_points_process(streamer, response)
 
     def make_predictions(self, event):
         decision = event.bet.calculate(event.streamer.channel_points)
@@ -677,17 +696,13 @@ class Twitch(object):
             )
 
     def claim_bonus(self, streamer, claim_id):
-        if Settings.logger.less is False:
+        if not Settings.logger.less:
             logger.info(
                 f"Claiming the bonus for {streamer}!",
                 extra={"emoji": ":gift:", "event": Events.BONUS_CLAIM},
             )
 
-        # json_data = copy.deepcopy(GQLOperations.ClaimCommunityPoints)
-        # json_data["variables"] = {
-        #     "input": {"channelID": streamer.channel_id, "claimID": claim_id}
-        # }
-        self.twitch_gql(TwitchGQLQuerys.ClaimCommunityPoints, {
+        self.twitch_gql_no_internet(TwitchGQLQuerys.ClaimCommunityPoints, {
             "input": {"channelID": streamer.channel_id, "claimID": claim_id}
         })
 
@@ -700,42 +715,32 @@ class Twitch(object):
                        "event": Events.MOMENT_CLAIM},
             )
 
-        # json_data = copy.deepcopy(GQLOperations.CommunityMomentCallout_Claim)
-        # json_data["variables"] = {
-        #     "input": {"momentID": moment_id}
-        # }
         self.twitch_gql(TwitchGQLQuerys.CommunityMomentCallout_Claim, {"input": {"momentID": moment_id}})
 
     # === CAMPAIGNS / DROPS / INVENTORY === #
-    def __get_campaign_ids_from_streamer(self, streamer: Streamer):
-        # json_data = copy.deepcopy(
-        #     GQLOperations.DropsHighlightService_AvailableDrops)
-        # json_data["variables"] = {"channelID": streamer.channel_id}
-        response = self.twitch_gql(TwitchGQLQuerys.DropsHighlightService_AvailableDrops,
-                                   {"channelID": streamer.channel_id})
+    def __get_campaign_ids_from_streamer(self, streamer: Streamer, response=None):
+        if not response:
+            response = self.twitch_gql_no_internet(TwitchGQLQuerys.DropsHighlightService_AvailableDrops,
+                                                   {"channelID": streamer.channel_id})
         try:
             return (
-                []
-                if response["data"]["channel"]["viewerDropCampaigns"] is None
-                else [
-                    item["id"]
-                    for item in response["data"]["channel"]["viewerDropCampaigns"]
-                ]
+                [item["id"] for item in response["data"]["channel"]["viewerDropCampaigns"]]
+                if response["data"]["channel"]["viewerDropCampaigns"]
+                else []
             )
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
             return []
 
     def __get_inventory(self):
-        # response = self.post_gql_request(GQLOperations.Inventory)
-        response = self.twitch_gql(TwitchGQLQuerys.Inventory)
+        response = self.twitch_gql_no_internet(TwitchGQLQuerys.Inventory)
+
         try:
             return response["data"]["currentUser"]["inventory"] if response else {}
         except (ValueError, KeyError, TypeError):
             return {}
 
     def __get_drops_dashboard(self, status=None):
-        # response = self.post_gql_request(GQLOperations.ViewerDropsDashboard)
-        response = self.twitch_gql(TwitchGQLQuerys.ViewerDropsDashboard)
+        response = self.twitch_gql_no_internet(TwitchGQLQuerys.ViewerDropsDashboard)
         campaigns = response["data"]["currentUser"]["dropCampaigns"] or []
 
         if status:
@@ -750,15 +755,13 @@ class Twitch(object):
         for chunk in chunks:
             json_data = []
             for campaign in chunk:
-                # json_data.append(copy.deepcopy(
-                #     GQLOperations.DropCampaignDetails))
                 json_data.append(TwitchGQLQuerys.DropCampaignDetails)
                 json_data[-1]["variables"] = {
                     "dropID": campaign["id"],
                     "channelLogin": f"{self.twitch_login.get_user_id()}",
                 }
 
-            for _, r in self.twitch_gql(json_data).items():
+            for _, r in self.twitch_gql_no_internet(json_data).items():
                 if r["data"]["user"]:
                     result.append(r["data"]["user"]["dropCampaign"])
         return result
@@ -787,11 +790,8 @@ class Twitch(object):
             f"Claim {drop}", extra={"emoji": ":package:", "event": Events.DROP_CLAIM}
         )
 
-        # json_data = copy.deepcopy(GQLOperations.DropsPage_ClaimDropRewards)
-        # json_data["variables"] = {
-        #     "input": {"dropInstanceID": drop.drop_instance_id}}
-        response = self.twitch_gql(TwitchGQLQuerys.DropsPage_ClaimDropRewards,
-                                   {"input": {"dropInstanceID": drop.drop_instance_id}})
+        response = self.twitch_gql_no_internet(TwitchGQLQuerys.DropsPage_ClaimDropRewards,
+                                               {"input": {"dropInstanceID": drop.drop_instance_id}})
         try:
             # response["data"]["claimDropRewards"] can be null and respose["data"]["errors"] != []
             # or response["data"]["claimDropRewards"]["status"] === DROP_INSTANCE_ALREADY_CLAIMED
@@ -811,7 +811,7 @@ class Twitch(object):
 
     def claim_all_drops_from_inventory(self):
         inventory = self.__get_inventory()
-        if inventory and "dropCampaignsInProgress" in inventory:
+        if inventory and "dropCampaignsInProgress" in inventory and inventory["dropCampaignsInProgress"]:
             for campaign in inventory["dropCampaignsInProgress"]:
                 for drop_dict in campaign["timeBasedDrops"]:
                     drop = Drop(drop_dict)
@@ -821,71 +821,67 @@ class Twitch(object):
                         time.sleep(random.uniform(5, 10))
 
     def sync_campaigns(self, streamers, chunk_size=6):
-        # self.__chuncked_sleep(30, 6)
         campaigns_update = 0
         while self._running:
             # If we have at least one streamer with settings = claim_drops True
             # Spawn a thread for sync inventory and dashboard
             with streamers:
                 claim_drops = at_least_one_value_in_settings_is(streamers, "claim_drops", True)
-            if claim_drops:
-                try:
-                    # Get update from dashboard each 60minutes
-                    if (
-                        campaigns_update == 0
-                        # or ((time.time() - campaigns_update) / 60) > 60
 
-                        # TEMPORARY AUTO DROP CLAIMING FIX
-                        # 30 minutes instead of 60 minutes
-                        or ((time.time() - campaigns_update) / 30) > 30
-                        #####################################
-                    ):
-                        campaigns_update = time.time()
+            try:
+                # Get update from dashboard each 60minutes
+                if (claim_drops and
+                        (campaigns_update == 0
+                            # or ((time.time() - campaigns_update) / 60) > 60
 
-                        # TEMPORARY AUTO DROP CLAIMING FIX
-                        self.claim_all_drops_from_inventory()
-                        #####################################
+                            # TEMPORARY AUTO DROP CLAIMING FIX
+                            # 30 minutes instead of 60 minutes
+                            or ((time.time() - campaigns_update) / 30) > 30)
+                    #####################################
+                ):
+                    campaigns_update = time.time()
 
-                        # Get full details from current ACTIVE campaigns
-                        # Use dashboard so we can explore new drops not currently active in our Inventory
-                        campaigns_details = self.__get_campaigns_details(
-                            self.__get_drops_dashboard(status="ACTIVE")
-                        )
-                        campaigns = []
+                    # TEMPORARY AUTO DROP CLAIMING FIX
+                    self.claim_all_drops_from_inventory()
+                    #####################################
 
-                        # Going to clear array and structure. Remove all the timeBasedDrops expired or not started yet
-                        for details in campaigns_details:
-                            if details:
-                                campaign = CampaignMngr()(details)
-                                if campaign.dt_match:
-                                    # Remove all the drops already claimed or with dt not matching
-                                    campaign.clear_drops()
-                                    if campaign.drops:
-                                        campaigns.append(campaign)
+                    # Get full details from current ACTIVE campaigns
+                    # Use dashboard so we can explore new drops not currently active in our Inventory
+                    campaigns_details = self.__get_campaigns_details(self.__get_drops_dashboard(status="ACTIVE"))
+                    campaigns = []
 
-                        # Divide et impera :)
-                        campaigns = self.__sync_campaigns(campaigns)
+                    # Going to clear array and structure. Remove all the timeBasedDrops expired or not started yet
+                    for details in campaigns_details:
+                        if details:
+                            campaign = CampaignMngr()(details)
+                            if campaign.dt_match:
+                                # Remove all the drops already claimed or with dt not matching
+                                campaign.clear_drops()
+                                if campaign.drops:
+                                    campaigns.append(campaign)
 
-                        # Check if user It's currently streaming the same game present in campaigns_details
-                        with streamers as streamers_locked:
-                            for i, streamer in streamers_locked.items():
-                                if streamer.drops_condition():
-                                    # yes! The streamer[i] have the drops_tags enabled and we
-                                    # It's currently stream a game with campaign active!
-                                    # With 'campaigns_ids' we are also sure that this streamer have the campaign active.
-                                    # yes! The streamer[index] have the drops_tags enabled and we
-                                    # It's currently stream a game with campaign active!
-                                    streamer.stream.campaigns = list(
-                                        filter(
-                                            lambda x: x.drops
-                                            and x.game == streamer.stream.game
-                                            and x.id in streamer.stream.campaigns_ids,
-                                            campaigns,
-                                        )
+                    # Divide et impera :)
+                    campaigns = self.__sync_campaigns(campaigns)
+
+                    # Check if user It's currently streaming the same game present in campaigns_details
+                    with streamers:
+                        for i, streamer in streamers.items():
+                            if streamer.drops_condition():
+                                # yes! The streamer[i] have the drops_tags enabled and we
+                                # It's currently stream a game with campaign active!
+                                # With 'campaigns_ids' we are also sure that this streamer have the campaign active.
+                                # yes! The streamer[index] have the drops_tags enabled and we
+                                # It's currently stream a game with campaign active!
+                                streamer.stream.campaigns = list(
+                                    filter(
+                                        lambda x: x.drops
+                                        and x.game == streamer.stream.game
+                                        and x.id in streamer.stream.campaigns_ids,
+                                        campaigns,
                                     )
+                                )
 
-                except (ValueError, KeyError, urllib3.exceptions.ConnectionError) as e:
-                    logger.error(f"Error while syncing inventory: {e}")
-                    self.__check_connection_handler(chunk_size)
-
-            self.__chuncked_sleep(60, chunk_size=chunk_size)
+                self.__chuncked_sleep(60, chunk_size=chunk_size)
+            except (ValueError, KeyError) as e:
+                logger.error(f"Error while syncing inventory: {e}")
+                # self.check_connection_handler(chunk_size)

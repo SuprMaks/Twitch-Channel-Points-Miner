@@ -1,4 +1,4 @@
-from time import time
+from datetime import datetime, timezone
 
 from TwitchChannelPointsMiner.classes.entities.Bet import Bet
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
@@ -57,7 +57,7 @@ class EventPrediction(object):
 
     @property
     def elapsed_raw(self):
-        return (time() - self.created_at).total_seconds()
+        return (datetime.now(timezone.utc) - self.created_at).total_seconds()
 
     @property
     def elapsed(self):

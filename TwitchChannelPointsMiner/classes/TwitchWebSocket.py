@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class TwitchWebSocket(Thread, WebSocketApp):
-    def __init__(self, index, parent_pool, *args, **kw):
+    def __init__(self, index: int, parent_pool, *args, **kw):
         Thread.__init__(self,
                         name = f"WebSocket #{index}",
                         target=self.run_forever,
@@ -31,6 +31,7 @@ class TwitchWebSocket(Thread, WebSocketApp):
         self.topics = []
         self.pending_topics = []
 
+        self.request_queue = parent_pool.request_queue
         self.twitch = parent_pool.twitch
         self.streamers = parent_pool.streamers
         self.events_predictions = parent_pool.events_predictions

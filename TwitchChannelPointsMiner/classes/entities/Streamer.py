@@ -77,8 +77,6 @@ class Streamer(LockedObject):
         "settings",
 
         # "_online",
-        "online_at",
-        "offline_at",
         "irc_chat",
 
         "start_channel_points",
@@ -98,13 +96,11 @@ class Streamer(LockedObject):
         self._channel_id: int = 0
         self.settings = settings
         # self._online = False
-        self.online_at = 0
-        self.offline_at = 0
         self.start_channel_points: int = 0
         self.channel_points: int = 0
         self.viewer_is_mod = False
         self.activeMultipliers = None
-        self.irc_chat = None
+        self.irc_chat: Optional[ThreadChat] = None
 
         self.stream = Stream()
 
@@ -119,8 +115,8 @@ class Streamer(LockedObject):
     @dispatch
     def __init__(self, channel_id: Union[str, int], username: str,
                  display_name: str = '', settings: StreamerSettings = StreamerSettings()):
-        self.__init__(username, display_name, settings)
         self.channel_id = channel_id
+        self.__init__(username, display_name, settings)
 
     def __repr__(self):
         return f"Streamer(username={self.username}, channel_id={self.channel_id}, "\
@@ -158,8 +154,8 @@ class Streamer(LockedObject):
 
     @property
     def display_name(self) -> str:
-        if self._display_name:
-            return self._display_name
+        if display_name:=self._display_name:
+            return display_name
         return self.username
 
     @display_name.setter
@@ -186,26 +182,45 @@ class Streamer(LockedObject):
     def offline(self):
         self.stream_spade_url = None
 
+    @property
+    def online_at(self):
+        return self.stream.online_at
+
+    @online_at.setter
+    def online_at(self, timestamp):
+        self.stream.online_at = timestamp
+
+    @property
+    def offline_at(self):
+        return self.stream.offline_at
+
+    @offline_at.setter
+    def offline_at(self, timestamp):
+        self.stream.online_at = timestamp
+
     def stream_spade_url(self, url: Optional[str]):
-        with self.stream, self:
+        with self.stream:
+            online = self.online
             self.stream._spade_url = url
-            if url is not (online:=self.online):
+            if bool(url) is not online:
                 if url:
-                    self.online_at = time.time()
+                    self.stream.online_at = time.time()
                     self.stream.init_watch_streak()
                 else:
-                    self.offline_at = time.time()
+                    self.stream.offline_at = time.time()
 
-        self.toggle_chat()
+        if bool(url) is not online or not self.stream.online_at:
+            self.toggle_chat()
 
-        logger.info(
-            f"{self} is {'Online' if online else 'Offline'}!",
-            extra={
-                "emoji": ":partying_face:" if online else ":sleeping:",
-                "event": Events.STREAMER_ONLINE if online else Events.STREAMER_OFFLINE,
-                "links": {self.printable_display_name: self.streamer_url}
-            },
-        )
+            online = self.online
+            logger.info(
+                f"{self} is {'Online' if online else 'Offline'}!",
+                extra={
+                    "emoji": ":partying_face:" if online else ":sleeping:",
+                    "event": Events.STREAMER_ONLINE if online else Events.STREAMER_OFFLINE,
+                    "links": {self.printable_display_name: self.streamer_url}
+                },
+            )
 
     stream_spade_url = property(None, stream_spade_url)
 
@@ -348,20 +363,20 @@ class Streamer(LockedObject):
         os.replace(temp_fname, fname)
 
     def leave_chat(self):
-        if self.irc_chat is not None:
+        if self.irc_chat:
             self.irc_chat.stop()
 
             # Recreate a new thread to start again
             # raise RuntimeError("threads can only be started once")
             self.irc_chat = ThreadChat(
-                self.irc_chat.username,
-                self.irc_chat.token,
+                self.irc_chat.chat_irc.username,
+                self.irc_chat.chat_irc.token,
                 self.username,
             )
 
     def __join_chat(self):
-        if self.irc_chat is not None:
-            if self.irc_chat.is_alive() is False:
+        if self.irc_chat:
+            if not self.irc_chat.is_alive():
                 self.irc_chat.start()
 
     def toggle_chat(self):

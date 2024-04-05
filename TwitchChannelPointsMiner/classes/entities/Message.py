@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import json
 import time
 
-from TwitchChannelPointsMiner.utils import server_time
+# from TwitchChannelPointsMiner.utils import server_time
 
 
 class Message(object):
@@ -21,7 +21,7 @@ class Message(object):
     ]
 
     def __init__(self, data):
-        self.created_timestamp = time.time()
+        self.created_timestamp = datetime.now(timezone.utc)
 
         self.topic, self.topic_user = data["topic"].split(".")
 
@@ -31,9 +31,9 @@ class Message(object):
         self.data = self.message["data"] if "data" in self.message else None
 
         self.server_timestamp = self._get_timestamp()
-        self.timestamp = datetime.fromtimestamp(self.server_timestamp
-                                                if self.server_timestamp
-                                                else self.created_timestamp, timezone.utc).isoformat() + "Z"
+        self.timestamp = (self.server_timestamp
+                          if self.server_timestamp
+                          else self.created_timestamp).isoformat() + "Z"
         self.channel_id = self.__get_channel_id()
 
         self.identifier = f"{self.type}.{self.topic}.{self.channel_id}"
@@ -46,14 +46,16 @@ class Message(object):
 
     @property
     def server_timestamp_diff(self):
-        return self.created_timestamp - self.server_timestamp if self.server_timestamp else 0
+        return (self.created_timestamp - self.server_timestamp).total_seconds() if self.server_timestamp else None
 
     @staticmethod
     def _server_timestamp_parse(message_data):
-        return message_data["server_time"] if message_data and "server_time" in message_data else None
+        return datetime.fromtimestamp(message_data["server_time"]
+                                      if message_data and "server_time" in message_data
+                                      else time.time(), timezone.utc)
 
     def _get_timestamp(self):
-        return (parser.isoparse(self.data["timestamp"]).timestamp()
+        return (parser.isoparse(self.data["timestamp"])
                 if "timestamp" in self.data
                 else self._server_timestamp_parse(self.data)) \
             if self.data \

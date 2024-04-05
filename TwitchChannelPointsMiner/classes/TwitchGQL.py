@@ -36,10 +36,10 @@ class TwitchGQL(object):
             headers['Accept'] = 'application/json; charset=utf-8'
 
         if self._method == 'POST':
-            get_data = self._prepare_http_post
+            get_data = self.prepare_http_post
             get_http_request = self._get_http_post_request
         else:
-            get_data = self._prepare_http_get
+            get_data = self.prepare_http_get
             get_http_request = self._get_http_get_request
 
         return self._exec_req(headers,
@@ -71,10 +71,10 @@ class TwitchGQL(object):
             return self.__call__(q, None, timeout)
         else:
             if self._method == 'POST':
-                get_data = self._prepare_http_post
+                get_data = self.prepare_http_post
                 get_http_request = self._get_http_post_request
             else:
-                get_data = self._prepare_http_get
+                get_data = self.prepare_http_get
                 get_http_request = self._get_http_get_request
 
             pr_q = [get_data(rq['operationName'],
@@ -92,32 +92,48 @@ class TwitchGQL(object):
     def __call__(self, query: TwitchGQLQuery, timeout=None) -> dict:
         return self.__call__(query.query())
 
-    def _exec_req(self, headers, body, timeout):
-        logger.debug('Query:\n%s', body)
+    def _exec_req(self, headers, payload, timeout):
+        logger.debug('Query:\n%s', payload)
         try:
-            req = self._pool.request(method='POST', url=self._url, headers=headers,
-                                     body=body, timeout=timeout or self._timeout)
-            body = req.data.decode('utf-8')
-            try:
-                data = json.loads(body)
-                if data and isinstance(data, dict) and (e:=data.get('errors')):
-                    logger.error(
-                        f"Error with TwitchGQL response req ( {body} ): {e}"
-                    )
-                return data
-            except json.JSONDecodeError as e:
-                logger.error(
-                    f"Error with TwitchGQL json decode req ({body}): {e}"
-                )
-                raise json.JSONDecodeError from e
-        except urllib3.exceptions.HTTPError as e:
+            data = json.loads(self._pool.request(method='POST', url=self._url, headers=headers,
+                                                 body=payload, timeout=timeout or self._timeout).data.decode('utf-8'))
+        # except urllib3.exceptions.HTTPError as e:
+        #     logger.error(
+        #         f"Error with TwitchGQL request req ({payload}): {e}"
+        #     )
+        #     raise urllib3.exceptions.HTTPError from e
+
+        except json.JSONDecodeError as e:
             logger.error(
-                f"Error with TwitchGQL request req ({body}): {e}"
+                f"Error with TwitchGQL json decode req ({payload}): {e}"
             )
-            raise urllib3.exceptions.HTTPError from e
+            raise json.JSONDecodeError from e
+
+        def check_out_data(data):
+            if data:
+                if isinstance(data, dict):
+                    if e := data.get('errors'):
+                        if (isinstance(e, list) and len(e) == 1 and
+                                (path := e[0]['path']) and (e := e[0]['message'].lower())):
+                            if e == 'service timeout':
+                                logger.error(f"TwitchGQL {e} path: {path}")
+                            else:
+                                logger.error(f"TwitchGQL {e} path: {path} {payload}")
+                        else:
+                            logger.error(
+                                f"{e} in TwitchGQL response data {payload}"
+                            )
+
+        if data:
+            if isinstance(data, dict):
+                check_out_data(data)
+            elif isinstance(data, list):
+                for rec in data:
+                    check_out_data(rec)
+        return data
 
     @staticmethod
-    def _prepare_http_post(operation_name, sha256_hash, variables):
+    def prepare_http_post(operation_name, sha256_hash, variables):
         params = {'operationName': operation_name}
         if variables:
             params['variables'] = variables
@@ -131,7 +147,7 @@ class TwitchGQL(object):
         return params
 
     @staticmethod
-    def _prepare_http_get(operation_name, sha256_hash, variables):
+    def prepare_http_get(operation_name, sha256_hash, variables):
         params = {}
         if operation_name:
             params['operationName'] = operation_name

@@ -1,7 +1,5 @@
-import json
 import logging
 import time
-from base64 import b64encode
 from typing import Union, Optional
 
 
@@ -19,15 +17,18 @@ class Stream(LockedObject):
         "_title",
         "game",
         "tags",
-        "stream_up",
+        # "stream_up",
         "drops_tags",
         "campaigns",
         "campaigns_ids",
-        "viewers_count",
+        "_viewers_count",
+        "_viewcount_upd",
         "_spade_url",
         "watch_streak_missing",
-        "minute_watched",
         "_last_update",
+        "online_at",
+        "offline_at",
+        "minute_watched",
         "_minute_watched_timestamp",
     ]
 
@@ -43,9 +44,13 @@ class Stream(LockedObject):
         self.campaigns = []
         self.campaigns_ids = []
 
-        self.stream_up = 0
+        # self.stream_up = 0
+        self.online_at = 0
+        self.offline_at = 0
 
-        self.viewers_count: int = 0
+        self._viewers_count: int = 0
+        self._viewcount_upd: int = 0
+
         self._last_update: float = 0
 
         self._spade_url: Optional[str] = None
@@ -60,8 +65,8 @@ class Stream(LockedObject):
 
     @property
     def id(self) -> Optional[str]:
-        if self._id:
-            return str(self._id)
+        if id := self._id:
+            return str(id)
         return None
 
     @id.setter
@@ -102,9 +107,9 @@ class Stream(LockedObject):
             self.tags = tags or []
             # ------------------------
             if viewers_count and (viewers_count:=int(viewers_count)):
-                self.viewers_count = viewers_count
+                self._viewers_count = viewers_count
             else:
-                self.viewers_count = 0
+                self._viewers_count = 0
 
             self.drops_tags = (
                 DROP_ID in [tag["id"] for tag in self.tags] and self.game != {}
@@ -120,14 +125,37 @@ class Stream(LockedObject):
             else ", ".join([tag["localizedName"] for tag in self.tags])
         )
 
+    # @property
+    # def stream_up_elapsed(self):
+    #     if stream_up := self.stream_up:
+    #         return time.time() - stream_up
+    #     return 0
+
     @property
-    def stream_up_elapsed(self):
-        return time.time() - self.stream_up
+    def viewcount_upd_elapsed(self):
+        if viewcount_upd := self._viewcount_upd:
+            return time.time() - viewcount_upd
+        return 0
+
+    @property
+    def viewers_count(self):
+        return self.viewers_count
+
+    @viewers_count.setter
+    def viewers_count(self, viewers: int):
+        with self:
+            self._viewers_count = viewers
+            self._viewcount_upd = time.time()
+
+    @property
+    def viewcount_upd(self):
+        return self._viewcount_upd
 
     @property
     def update_elapsed(self):
-        last_upd = self._last_update
-        return 0 if last_upd == 0 else (time.time() - last_upd)
+        if last_upd := self._last_update:
+            return time.time() - last_upd
+        return 0
 
     def init_watch_streak(self):
         with self:

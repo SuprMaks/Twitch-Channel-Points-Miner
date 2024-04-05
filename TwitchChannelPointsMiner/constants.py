@@ -52,7 +52,7 @@ RETRY_STRATEGY = urllib3.util.Retry(
 TWITCH_POOL = urllib3.PoolManager(retries=RETRY_STRATEGY,
                                   timeout=urllib3.Timeout(total=5),
                                   num_pools=10,
-                                  maxsize=10,
+                                  maxsize=2,
                                   block=True)
 
 

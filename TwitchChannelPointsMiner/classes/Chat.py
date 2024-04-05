@@ -2,6 +2,7 @@ import logging
 import time
 from enum import Enum, auto
 from threading import Thread
+from typing import Optional
 
 from irc.bot import SingleServerIRCBot
 
@@ -22,10 +23,15 @@ class ChatPresence(Enum):
 
 
 class ClientIRC(SingleServerIRCBot):
+    __slots__ = (
+        "token",
+        "channel"
+    )
+
     def __init__(self, username, token, channel):
         self.token = token
         self.channel = "#" + channel
-        self.__active = False
+        # self.__active = False
 
         super(ClientIRC, self).__init__(
             [(IRC, IRC_PORT, f"oauth:{token}")], username, username
@@ -35,20 +41,20 @@ class ClientIRC(SingleServerIRCBot):
         client.join(self.channel)
 
     def start(self):
-        self.__active = True
+        # self.__active = True
         self._connect()
-        while self.__active:
+        while self.connection.is_connected():
             try:
                 self.reactor.process_once(timeout=0.2)
                 time.sleep(0.01)
             except Exception as e:
                 logger.error(
-                    f"Exception raised: {e}. Thread is active: {self.__active}"
+                    f"Exception raised: {e}. Thread is active: {self.connection.is_connected()}"
                 )
 
     def die(self, msg="Bye, cruel world!"):
         self.connection.disconnect(msg)
-        self.__active = False
+        # self.__active = False
 
     """
     def on_join(self, connection, event):
@@ -58,16 +64,15 @@ class ClientIRC(SingleServerIRCBot):
     # """
     def on_pubmsg(self, connection, event):
         msg = event.arguments[0]
-        mention = None
 
-        if Settings.disable_at_in_nickname is True:
+        if Settings.disable_at_in_nickname:
             mention = f"{self._nickname.lower()}"
         else:
             mention = f"@{self._nickname.lower()}"
 
         # also self._realname
         # if msg.startswith(f"@{self._nickname}"):
-        if mention != None and mention in msg.lower():
+        if mention and mention in msg.lower():
             # nickname!username@nickname.tmi.twitch.tv
             nick = event.source.split("!", 1)[0]
             # chan = event.target
@@ -78,28 +83,34 @@ class ClientIRC(SingleServerIRCBot):
 
 
 class ThreadChat(Thread):
+    __slots__ = (
+        # "username",
+        # "token",
+        # "channel",
+        "chat_irc"
+    )
+
     def __deepcopy__(self, memo):
         return None
 
     def __init__(self, username, token, channel):
-        super(ThreadChat, self).__init__()
+        self.chat_irc: Optional[ClientIRC] = ClientIRC(username, token, channel)
+        super(ThreadChat, self).__init__(name=f"ThreadChat channel: {channel}")
 
-        self.username = username
-        self.token = token
-        self.channel = channel
-
-        self.chat_irc = None
+        # self.username = username
+        # self.token = token
+        # self.channel = channel
 
     def run(self):
-        self.chat_irc = ClientIRC(self.username, self.token, self.channel)
+        # self.chat_irc = ClientIRC(self.username, self.token, self.channel)
         logger.info(
-            f"Join IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
+            f"Join IRC Chat: {self.chat_irc.channel}", extra={"emoji": ":speech_balloon:"}
         )
         self.chat_irc.start()
 
     def stop(self):
-        if self.chat_irc is not None:
+        if self.chat_irc and self.chat_irc.connection.is_connected():
             logger.info(
-                f"Leave IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
+                f"Leave IRC Chat: {self.chat_irc.channel}", extra={"emoji": ":speech_balloon:"}
             )
             self.chat_irc.die()

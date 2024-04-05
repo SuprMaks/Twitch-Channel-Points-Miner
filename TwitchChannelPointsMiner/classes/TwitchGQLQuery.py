@@ -7,18 +7,24 @@ class TwitchGQLQuery:
         "_query"
     ]
 
-    def __init__(self, q: dict, v: Optional[dict] = None):
-        t = q.copy()
-        if v:
-            t['variables'] = v.copy()
-        self._query = [t]
+    def __init__(self, q: Optional[dict] = None, v: Optional[dict] = None):
+        self._query = []
+        if q:
+            t = q.copy()
+            if v:
+                t['variables'] = v.copy()
+            self._query = [t]
 
     def __call__(self, q: dict, v: Optional[dict] = None):
-        t = q.copy()
-        if v:
-            t['variables'] = v.copy()
-        self._query.append(t)
+        if q:
+            t = q.copy()
+            if v:
+                t['variables'] = v.copy()
+            self._query.append(t)
         return self
+
+    def __bool__(self):
+        return bool(self._query)
 
     def query(self):
         return self._query.copy()

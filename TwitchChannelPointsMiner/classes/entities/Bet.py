@@ -325,14 +325,22 @@ class Bet(object):
                 else self.__return_choice(OutcomeKeys.TOTAL_USERS)
             )
 
-        if self.decision["choice"]:
+        if self.decision["choice"] is not None:
             # index = char_decision_as_index(self.decision["choice"])
             index = self.decision["choice"]
             self.decision["id"] = self.outcomes[index]["id"]
-            self.decision["amount"] = min(
-                int(balance * (self.settings.percentage / 100)),
-                self.settings.max_points,
-            )
+            if self.settings.minimum_points > balance:
+                k = min(1.0, self.settings.minimum_points / self.settings.max_points)
+                k = int(balance / k / 2)
+                self.decision["amount"] = min(
+                        int(balance * (self.settings.percentage / 100)),
+                        k
+                )
+            else:
+                self.decision["amount"] = min(
+                        int(balance * (self.settings.percentage / 100)),
+                        self.settings.max_points,
+                    )
             if (
                 self.settings.stealth_mode
                 and self.decision["amount"]
@@ -343,4 +351,6 @@ class Bet(object):
                     self.outcomes[index][OutcomeKeys.TOP_POINTS] - reduce_amount
                 )
             self.decision["amount"] = int(self.decision["amount"])
+            if self.decision["amount"] > 250000:
+                self.decision["amount"] = 250000
         return self.decision

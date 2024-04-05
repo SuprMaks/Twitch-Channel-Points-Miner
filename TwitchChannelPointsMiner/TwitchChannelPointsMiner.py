@@ -2,7 +2,6 @@
 import copy
 import logging
 import os
-import random
 import signal
 import sys
 import threading
@@ -29,7 +28,6 @@ from TwitchChannelPointsMiner.logger import LoggerSettings, configure_loggers
 from TwitchChannelPointsMiner.utils import (
     check_versions,
     get_user_agent,
-    internet_connection_available,
     set_default_settings,
 )
 
@@ -42,7 +40,7 @@ from TwitchChannelPointsMiner.utils import (
 #   - irc.client - [_dispatcher]
 #   - irc.client - [_handle_message]
 logging.getLogger("chardet.charsetprober").setLevel(logging.ERROR)
-logging.getLogger("requests").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 logging.getLogger("irc.client").setLevel(logging.ERROR)
 logging.getLogger("seleniumwire").setLevel(logging.ERROR)
@@ -296,252 +294,314 @@ class TwitchChannelPointsMiner:
 
             make_predictions = False
 
+            new_streamers_timestamp = None
+            channel_points_upd_timestamp = None
             while self._running:
-                new_streamers = {}
-                for username, val in self._streamers_dict.items():
-                    if is_key_value_in_object_dict(self.streamers, 'username', username) is None:
-                        new_streamers[username] = copy.deepcopy(val)
+                if (not new_streamers_timestamp or
+                        (new_streamers_timestamp and
+                         (time.time() > new_streamers_timestamp + 60 * 30))):
+                    new_streamers = {}
+                    for username, val in self._streamers_dict.items():
+                        if is_key_value_in_object_dict(self.streamers, 'username', username) is None:
+                            new_streamers[username] = copy.deepcopy(val)
 
-                if followers:
-                    followers_array = self.twitch.get_followers(order=followers_order)
-                    logger.info(
-                        f"Load {len(followers_array)} followers from your profile!",
-                        extra={"emoji": ":clipboard:"},
-                    )
+                    if followers:
+                        followers_array = self.twitch.get_followers(order=followers_order)
+                        logger.info(
+                            f"Load {len(followers_array)} followers from your profile!",
+                            extra={"emoji": ":clipboard:"},
+                        )
 
-                    for id in list(self.streamers):
-                        streamer = self.streamers[id]
-                        if self.streamers[id].username not in followers_array:
-                            self.ws_pool.unsubscribe(
-                                PubsubTopic("video-playback-by-id",
-                                            streamer=streamer)
-                            )
-
-                            if self.streamers[id].settings.follow_raid:
+                        for id in list(self.streamers):
+                            streamer = self.streamers[id]
+                            if self.streamers[id].username not in followers_array:
                                 self.ws_pool.unsubscribe(
-                                    PubsubTopic("raid",
-                                                streamer=streamer))
-
-                            if self.streamers[id].settings.make_predictions:
-                                self.ws_pool.unsubscribe(
-                                    PubsubTopic("predictions-channel-v1",
+                                    PubsubTopic("video-playback-by-id",
                                                 streamer=streamer)
                                 )
 
-                            if self.streamers[id].settings.claim_moments:
-                                self.ws_pool.unsubscribe(
-                                    PubsubTopic("community-moments-channel-v1",
-                                                streamer=streamer)
-                                )
-
-                            logger.info(
-                                f"{streamer} is removed from mining list!",
-                                extra={
-                                    "emoji": ":sleeping:",
-                                    "links": {streamer.printable_display_name: streamer.streamer_url}
-                                },
-                            )
-
-                            with self.streamers:
-                                with streamer, self._streamers_storage:
-                                    self._streamers_storage[id] = streamer
-                                del self.streamers[id]
-
-                            if make_predictions and streamer.settings.make_predictions:
-                                for _, streamer in self.streamers.items():
-                                    if streamer.settings.make_predictions:
-                                        break
-                                else:
-                                    make_predictions = False
+                                if self.streamers[id].settings.follow_raid:
                                     self.ws_pool.unsubscribe(
-                                        PubsubTopic(
-                                            "predictions-user-v1",
-                                            user_id=user_id,
-                                        )
+                                        PubsubTopic("raid",
+                                                    streamer=streamer))
+
+                                if self.streamers[id].settings.make_predictions:
+                                    self.ws_pool.unsubscribe(
+                                        PubsubTopic("predictions-channel-v1",
+                                                    streamer=streamer)
                                     )
 
-                    for username, display_name in followers_array.items():
-                        if username in new_streamers:
-                            if isinstance(new_streamers[username], Streamer):
-                                new_streamers[username].display_name = display_name
-                            else:
+                                if self.streamers[id].settings.claim_moments:
+                                    self.ws_pool.unsubscribe(
+                                        PubsubTopic("community-moments-channel-v1",
+                                                    streamer=streamer)
+                                    )
+
+                                logger.info(
+                                    f"{streamer} is removed from mining list!",
+                                    extra={
+                                        "emoji": ":sleeping:",
+                                        "links": {streamer.printable_display_name: streamer.streamer_url}
+                                    },
+                                )
+
+                                with self.streamers:
+                                    with streamer, self._streamers_storage:
+                                        self._streamers_storage[id] = streamer
+                                        streamer.offline()
+                                        streamer.stream.online_at = streamer.stream.offline_at = 0
+                                    del self.streamers[id]
+
+                                if make_predictions and streamer.settings.make_predictions:
+                                    for _, streamer in self.streamers.items():
+                                        if streamer.settings.make_predictions:
+                                            break
+                                    else:
+                                        make_predictions = False
+                                        self.ws_pool.unsubscribe(
+                                            PubsubTopic(
+                                                "predictions-user-v1",
+                                                user_id=user_id,
+                                            )
+                                        )
+
+                        for username, display_name in followers_array.items():
+                            if username in new_streamers:
+                                if isinstance(new_streamers[username], Streamer):
+                                    new_streamers[username].display_name = display_name
+                                else:
+                                    new_streamers[username] = display_name
+                            elif username not in blacklist and \
+                                    is_key_value_in_object_dict(self.streamers, 'username', username) is None:
                                 new_streamers[username] = display_name
-                        elif username not in blacklist and \
-                                is_key_value_in_object_dict(self.streamers, 'username', username) is None:
-                            new_streamers[username] = display_name
 
-                if new_streamers:
-                    logger.info(
-                        f"Loading data for {len(new_streamers)} streamers. Please wait...",
-                        extra={"emoji": ":nerd_face:"},
-                    )
+                    if new_streamers:
+                        logger.info(
+                            f"Loading data for {len(new_streamers)} streamers. Please wait...",
+                            extra={"emoji": ":nerd_face:"},
+                        )
 
-                    for username, val in new_streamers.items():
-                        if not self._running:
-                            break
+                        for username, val in new_streamers.items():
+                            if not self._running:
+                                break
 
-                        # time.sleep(random.uniform(0.3, 0.7))
+                            # time.sleep(random.uniform(0.3, 0.7))
 
-                        streamer = val if isinstance(val, Streamer) else Streamer(username, val)
-                        try:
-                            streamer.settings = set_default_settings(
-                                streamer.settings, Settings.streamer_settings
-                            )
-                            streamer.settings.bet = set_default_settings(
-                                streamer.settings.bet, Settings.streamer_settings.bet
-                            )
+                            streamer = val if isinstance(val, Streamer) else Streamer(username, val)
+                            try:
+                                streamer.settings = set_default_settings(
+                                    streamer.settings, Settings.streamer_settings
+                                )
+                                streamer.settings.bet = set_default_settings(
+                                    streamer.settings.bet, Settings.streamer_settings.bet
+                                )
 
-                            response_pack = self.twitch.twitch_gql(
-                                TwitchGQLQuery(TwitchGQLQuerys.ReportMenuItem, {"channelLogin": streamer.username})
-                                (TwitchGQLQuerys.ChannelPointsContext, {"channelLogin": streamer.username})
-                                (TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel, {"channel": streamer.username}))
-                            if response_pack and (e:=response_pack.get('errors')):
-                                logger.error(f"Error with TwitchGQL req : {e}")
-                            else:
-                                for name, response in response_pack.items():
-                                    if name == TwitchGQLQuerys.ReportMenuItem.name:
-                                        if channel_id:=self.twitch.get_channel_id_process(response):
-                                            channel_id = int(channel_id)
-                                            if channel_id:
-                                                streamer.channel_id = channel_id
-                                                if channel_id in self._streamers_storage:
-                                                    streamer = self._streamers_storage[channel_id]
-                                                    logger.info(
-                                                        f"Restoring data for {streamer.printable_display_name}...",
-                                                        extra={
-                                                            "emoji": ":nerd_face:",
-                                                            "links": {
-                                                                streamer.printable_display_name: streamer.streamer_url}
-                                                        },
-                                                    )
+                                query = TwitchGQLQuery(TwitchGQLQuerys.ReportMenuItem,
+                                                       {"channelLogin": streamer.username})\
+                                    (TwitchGQLQuerys.ChannelPointsContext,
+                                     {"channelLogin": streamer.username})\
+                                    (TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel,
+                                     {"channel": streamer.username})
+
+                                if streamer.settings.claim_drops and int(streamer.channel_id):
+                                    query(TwitchGQLQuerys.DropsHighlightService_AvailableDrops,
+                                          {"channelID": streamer.channel_id})
+
+                                if response_pack := self.twitch.twitch_gql_no_internet(query):
+                                    for name, response in response_pack.items():
+                                        if response and (e := response_pack.get('errors')):
+                                            logger.error(f"TwitchGQL error in response {e}")
+                                            # continue
+                                        if name == TwitchGQLQuerys.ReportMenuItem.name:
+                                            if channel_id := self.twitch.channel_id_process(response):
+                                                channel_id = int(channel_id)
+                                                if channel_id:
+                                                    streamer.channel_id = channel_id
+                                                    if channel_id in self._streamers_storage:
+                                                        streamer = self._streamers_storage[channel_id]
+                                                        logger.info(
+                                                            f"Restoring data for {streamer.printable_display_name}...",
+                                                            extra={
+                                                                "emoji": ":nerd_face:",
+                                                                "links": {
+                                                                    streamer.printable_display_name:
+                                                                        streamer.streamer_url}
+                                                            },
+                                                        )
+                                                else:
+                                                    break
                                             else:
                                                 break
-                                        else:
-                                            break
-                                    elif name == TwitchGQLQuerys.ChannelPointsContext.name:
-                                        self.twitch.load_channel_points_process(streamer, response)
-                                        if streamer.channel_id not in self._streamers_storage:
-                                            streamer.start_channel_points = streamer.channel_points
-                                    elif name == TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel.name:
-                                        self.twitch.force_pull_stream_online_status_info(streamer, response)
+                                        elif name == TwitchGQLQuerys.ChannelPointsContext.name:
+                                            self.twitch.load_channel_points_context(streamer, response)
+                                            if streamer.channel_id not in self._streamers_storage:
+                                                streamer.start_channel_points = streamer.channel_points
+                                        # elif name == TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel.name:
+                                        #     self.twitch.pull_stream_online_status_info(streamer, response)
+                                    self.twitch.pull_stream_online_status_info(streamer, response_pack)
 
-                            if not streamer.channel_id:
-                                continue
-                            channel_id = int(streamer.channel_id)
+                                if not streamer.channel_id:
+                                    continue
+                                channel_id = int(streamer.channel_id)
 
-                            # if channel_id:=self.twitch.get_channel_id(username):
-                            #     channel_id = int(channel_id)
-                            #     streamer.channel_id = channel_id
-                            # else:
-                            #     continue
+                                # if channel_id:=self.twitch.get_channel_id(username):
+                                #     channel_id = int(channel_id)
+                                #     streamer.channel_id = channel_id
+                                # else:
+                                #     continue
 
-                            # Restore history and start points
-                            if channel_id in self._streamers_storage:
-                                # streamer = self._streamers_storage[channel_id]
-                                # logger.info(
-                                #     f"Restoring data for {streamer.printable_display_name}...",
-                                #     extra={
-                                #         "emoji": ":nerd_face:",
-                                #         "links": {streamer.printable_display_name: streamer.streamer_url}
-                                #     },
-                                # )
+                                # Restore history and start points
+                                if channel_id in self._streamers_storage:
+                                    # streamer = self._streamers_storage[channel_id]
+                                    # logger.info(
+                                    #     f"Restoring data for {streamer.printable_display_name}...",
+                                    #     extra={
+                                    #         "emoji": ":nerd_face:",
+                                    #         "links": {streamer.printable_display_name: streamer.streamer_url}
+                                    #     },
+                                    # )
 
-                                if streamer.username != username:
-                                    logger.info(
-                                        f"New username {streamer.username} → {username}...",
-                                        extra={
-                                            "emoji": ":nerd_face:",
-                                        },
-                                    )
-                                    streamer.username = username
-                                if val and isinstance(val, str) and streamer.display_name != val:
-                                    logger.info(
-                                        f"New display_name {streamer.display_name} → {val}...",
-                                        extra={
-                                            "emoji": ":nerd_face:",
-                                            "links": {streamer.display_name: streamer.streamer_url,
-                                                      val: streamer.streamer_url}
-                                        },
-                                    )
-                                    streamer.display_name = val
-
-                            if streamer.settings.chat != ChatPresence.NEVER:
-                                streamer.irc_chat = ThreadChat(
-                                    self.username,
-                                    self.twitch.twitch_login.get_auth_token(),
-                                    streamer.username,
-                                )
-
-                            # Populate the streamers with default values.
-                            # 1. Load channel points and auto-claim bonus
-                            # 2. Check if streamers are online
-                            # 3. DEACTIVATED: Check if the user is a moderator.
-                            # (was used before the 5th of April 2021 to deactivate predictions)
-                            # time.sleep(random.uniform(0.3, 0.7))
-                            # self.twitch.load_channel_points_context(streamer)
-
-                            if channel_id not in self._streamers_storage:
-                                with self._streamers_storage:
-                                    self._streamers_storage[channel_id] = streamer
-                                # streamer.start_channel_points = streamer.channel_points
-
-                            # self.twitch.pull_stream_online_status_info(streamer)
-                            # self.twitch.viewer_is_mod(streamer)
-
-                            with self.streamers, streamer:
-                                self.streamers[channel_id] = streamer
-
-                            self.ws_pool.submit(
-                                PubsubTopic("video-playback-by-id",
-                                            streamer=self.streamers[channel_id])
-                            )
-
-                            if streamer.settings.follow_raid:
-                                self.ws_pool.submit(
-                                    PubsubTopic("raid",
-                                                streamer=self.streamers[channel_id]))
-
-                            if streamer.settings.make_predictions:
-                                if not make_predictions:
-                                    make_predictions = True
-
-                                    # Going to subscribe to predictions-user-v1.
-                                    # Get update when we place a new prediction (confirm)
-                                    self.ws_pool.submit(
-                                        PubsubTopic(
-                                            "predictions-user-v1",
-                                            user_id=user_id,
+                                    if streamer.username != username:
+                                        logger.info(
+                                            f"New username {streamer.username} → {username}...",
+                                            extra={
+                                                "emoji": ":nerd_face:",
+                                            },
                                         )
+                                        streamer.username = username
+                                    if val and isinstance(val, str) and streamer.display_name != val:
+                                        logger.info(
+                                            f"New display_name {streamer.display_name} → {val}...",
+                                            extra={
+                                                "emoji": ":nerd_face:",
+                                                "links": {streamer.display_name: streamer.streamer_url,
+                                                          val: streamer.streamer_url}
+                                            },
+                                        )
+                                        streamer.display_name = val
+
+                                if streamer.settings.chat != ChatPresence.NEVER:
+                                    streamer.irc_chat = ThreadChat(
+                                        self.username,
+                                        self.twitch.twitch_login.get_auth_token(),
+                                        streamer.username,
                                     )
 
+                                # Populate the streamers with default values.
+                                # 1. Load channel points and auto-claim bonus
+                                # 2. Check if streamers are online
+                                # 3. DEACTIVATED: Check if the user is a moderator.
+                                # (was used before the 5th of April 2021 to deactivate predictions)
+                                # time.sleep(random.uniform(0.3, 0.7))
+                                # self.twitch.load_channel_points_context(streamer)
+
+                                if channel_id not in self._streamers_storage:
+                                    with self._streamers_storage:
+                                        self._streamers_storage[channel_id] = streamer
+                                    # streamer.start_channel_points = streamer.channel_points
+
+                                # self.twitch.pull_stream_online_status_info(streamer)
+                                # self.twitch.viewer_is_mod(streamer)
+
+                                with self.streamers, streamer:
+                                    self.streamers[channel_id] = streamer
+
                                 self.ws_pool.submit(
-                                    PubsubTopic("predictions-channel-v1",
+                                    PubsubTopic("video-playback-by-id",
                                                 streamer=self.streamers[channel_id])
                                 )
 
-                            if streamer.settings.claim_moments:
-                                self.ws_pool.submit(
-                                    PubsubTopic("community-moments-channel-v1",
-                                                streamer=self.streamers[channel_id])
+                                if streamer.settings.follow_raid:
+                                    self.ws_pool.submit(
+                                        PubsubTopic("raid",
+                                                    streamer=self.streamers[channel_id]))
+
+                                if streamer.settings.make_predictions:
+                                    if not make_predictions:
+                                        make_predictions = True
+
+                                        # Going to subscribe to predictions-user-v1.
+                                        # Get update when we place a new prediction (confirm)
+                                        self.ws_pool.submit(
+                                            PubsubTopic(
+                                                "predictions-user-v1",
+                                                user_id=user_id,
+                                            )
+                                        )
+
+                                    self.ws_pool.submit(
+                                        PubsubTopic("predictions-channel-v1",
+                                                    streamer=self.streamers[channel_id])
+                                    )
+
+                                if streamer.settings.claim_moments:
+                                    self.ws_pool.submit(
+                                        PubsubTopic("community-moments-channel-v1",
+                                                    streamer=self.streamers[channel_id])
+                                    )
+                            except StreamerDoesNotExistException:
+                                logger.info(
+                                    f"Streamer {username} does not exist",
+                                    extra={"emoji": ":cry:"},
                                 )
-                        except StreamerDoesNotExistException:
-                            logger.info(
-                                f"Streamer {username} does not exist",
-                                extra={"emoji": ":cry:"},
-                            )
 
-                if self._running:
-                    for i in range(1, int(60 * 30 // 5)):
-                        time.sleep(5)
-                        if self._running is False:
-                            break
+                    new_streamers_timestamp = time.time()
 
-                    for _, streamer in self.streamers.items():
-                        if self._running is False:
-                            break
+                # if self._running:
+                    # for i in range(1, int(60 * 30 // 5)):
+                    #     time.sleep(5)
+                    #     if self._running is False:
+                    #         break
 
-                        if streamer.online:
-                            self.twitch.load_channel_points_context(streamer)
+                    # with self.streamers:
+                if not channel_points_upd_timestamp:
+                    channel_points_upd_timestamp = time.time()
+
+                channel_points_upd = time.time() > channel_points_upd_timestamp + 60 * 30
+                for _, streamer in sorted(self.streamers.items(),
+                                          reverse=True,
+                                          key=lambda rec: rec[1].stream.online_at
+                                          if rec[1].online
+                                          else max(rec[1].stream.online_at, rec[1].stream.viewcount_upd)):
+                    if not self._running:
+                        break
+
+                    query = TwitchGQLQuery()
+                    now = time.time()
+                    if (now > streamer.stream.offline_at + 60 and
+
+                            ((streamer.online and now > streamer.stream.online_at + 60 and
+                              (streamer.stream.update_elapsed > 60 * 6 or
+                               streamer.stream.viewcount_upd_elapsed > 30 * 3)) or
+
+                             (not streamer.online and (now < streamer.stream.viewcount_upd + 30 * 2 or
+                                                       now < streamer.stream.online_at + 60 * 6)))):
+                        # streamer.stream.stream_up_elapsed > 120 or \
+                        # (not streamer.stream.stream_up or streamer.stream.stream_up_elapsed > 120):
+                        query(TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel, {"channel": streamer.username})
+                        if streamer.settings.claim_drops:
+                            query(TwitchGQLQuerys.DropsHighlightService_AvailableDrops,
+                                  {"channelID": streamer.channel_id})
+                        # self.twitch.pull_stream_online_status_info(streamer)
+
+                    if channel_points_upd and streamer.online:
+                        query(TwitchGQLQuerys.ChannelPointsContext, {"channelLogin": streamer.username})
+                        # self.twitch.load_channel_points_context(streamer)
+
+                    if query:
+                        response_pack = self.twitch.twitch_gql_no_internet(query)
+                        # if TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel.name in response_pack or\
+                        #    TwitchGQLQuerys.DropsHighlightService_AvailableDrops.name in response_pack:
+                        self.twitch.pull_stream_online_status_info(streamer, response_pack)
+
+                        if TwitchGQLQuerys.ChannelPointsContext.name in response_pack:
+                            self.twitch.load_channel_points_context(streamer,
+                                                                    response_pack[TwitchGQLQuerys.ChannelPointsContext.name])
+
+                if channel_points_upd:
+                    channel_points_upd_timestamp = time.time()
+
+                time.sleep(2)
 
     def end(self, signum, frame):
         logger.info("CTRL+C Detected! Please wait just a moment!")
