@@ -634,7 +634,10 @@ class TwitchChannelPointsMiner:
         self.__print_report()
 
         # Stop the queue listener to make sure all messages have been logged
-        self.queue_listener.stop()
+        if hasattr(self.queue_listener, '_thread') and self.queue_listener._thread:
+            self.queue_listener.stop()
+        else:
+            self.queue_listener.enqueue_sentinel()
 
         sys.exit(0)
 
