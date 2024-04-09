@@ -44,13 +44,15 @@ class WebSocketsPool:
                         time.sleep((chunk:=target_delay / 4))
                         delay_sum += chunk
                     if ws:
-                        ws.send({"type": "PING"})
-                        ws.last_ping_tm = time.time()
+                        try:
+                            ws.send({"type": "PING"})
+                            ws.last_ping_tm = time.time()
+                        except Exception:
+                            ...
                     delay_sum = 0
 
     def _watchdog(self):
         while True:
-            time.sleep(random.uniform(20, 60))
             # Do an external control for WebSocket. Check if the thread is running
             # Check if is not None because maybe we have already created a new connection on array+1
             # and now index is None
@@ -66,6 +68,7 @@ class WebSocketsPool:
                         elif ws.elapsed_last_pong > 3:
                             logger.info(f"#{ws.index} - The last PONG was received more than 3 minutes ago")
                             self.handle_reconnection(ws)
+                    time.sleep(60 // len(self.ws))
 
     def _request_processor(self):
         queues = {}
@@ -104,11 +107,7 @@ class WebSocketsPool:
                                   {"channel": task['streamer'].username})
 
                 if query:
-                    response_pack = self.twitch.twitch_gql_no_internet(query)
-                    if len(query._query) > 1:
-                        logger.info(f"{query.query()}")
-                        logger.info(f"{response_pack}")
-                    if response_pack:
+                    if response_pack := self.twitch.twitch_gql_no_internet(query):
                         for name, response in response_pack.items():
                             if e := response.get('errors'):
                                 logger.error(f"TwitchGQL error in response {e}")
@@ -142,7 +141,7 @@ class WebSocketsPool:
                                         extra={"emoji": ":video_camera:",
                                                "event": Events.MOMENT_CLAIM},
                                     )
-            time.sleep(2)
+            time.sleep(3)
 
     """
     API Limits
@@ -226,16 +225,16 @@ class WebSocketsPool:
     @staticmethod
     def handle_reconnection(ws):
         # Reconnect only if ws.is_reconnecting is False to prevent more than 1 ws from being created
-        if ws.is_reconnecting is False:
-            # Close the current WebSocket.
-            ws.keep_running = False
-            # Reconnect only if ws.forced_close is False (replace the keep_running)
-
+        if not ws.is_reconnecting:
             # Set the current socket as reconnecting status
             # So the external ping check will be locked
             ws.is_reconnecting = True
 
-            if ws.forced_close is False:
+            # Close the current WebSocket.
+            ws.keep_running = False
+            # Reconnect only if ws.forced_close is False (replace the keep_running)
+
+            if not ws.forced_close:
                 logger.info(
                     f"#{ws.index} - Reconnecting to Twitch PubSub server in ~60 seconds"
                 )

@@ -560,7 +560,7 @@ class TwitchChannelPointsMiner:
                 channel_points_upd = time.time() > channel_points_upd_timestamp + 60 * 30
                 for _, streamer in sorted(self.streamers.items(),
                                           reverse=True,
-                                          key=lambda rec: rec[1].stream.online_at
+                                          key=lambda rec: max(rec[1].stream.online_at, rec[1].stream.offline_at)
                                           if rec[1].online
                                           else max(rec[1].stream.online_at, rec[1].stream.viewcount_upd)):
                     if not self._running:

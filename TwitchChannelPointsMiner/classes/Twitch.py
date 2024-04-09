@@ -99,7 +99,8 @@ class Twitch(object):
                     urllib3.exceptions.MaxRetryError,
                     urllib3.exceptions.ConnectTimeoutError,
                     urllib3.exceptions.ReadTimeoutError):
-                self.check_connection_handler(6)
+                logger.warning("Seems like TwitchGQL has connection issue")
+                self.check_connection_handler(10)
 
     def login(self):
         if not os.path.isfile(self.cookies_file):
@@ -273,6 +274,7 @@ class Twitch(object):
         # The success rate It's very hight usually. Why we have failed?
         # Check internet connection ...
         with self._internet_lock:
+            logger.warning("Checking internet connection...")
             while not internet_connection_available():
                 random_sleep = 1  # random.randint(1, 3)
                 logger.warning(
@@ -280,6 +282,7 @@ class Twitch(object):
                 )
                 self.__chuncked_sleep(random_sleep * 60, chunk_size=chunk_size)
             else:
+                logger.warning("Internet connection is good")
                 time.sleep(1)
 
     """
