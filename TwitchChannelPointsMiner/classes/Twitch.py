@@ -98,9 +98,10 @@ class Twitch(object):
                     urllib3.exceptions.ConnectionError,
                     urllib3.exceptions.MaxRetryError,
                     urllib3.exceptions.ConnectTimeoutError,
-                    urllib3.exceptions.ReadTimeoutError):
+                    urllib3.exceptions.ReadTimeoutError) as e:
                 logger.warning("Seems like TwitchGQL has connection issue")
-                self.check_connection_handler(10)
+                if self.check_connection_handler(6):
+                    logger.error(f"TwitchGQL url error {e}")
 
     def login(self):
         if not os.path.isfile(self.cookies_file):
@@ -128,19 +129,29 @@ class Twitch(object):
         headers = {"User-Agent": USER_AGENTS["Linux"]["FIREFOX"]}
 
         def get_st_url():
+            result = None
+
             main_page_request = TWITCH_POOL.request('GET', streamer.streamer_url, headers=headers)
-            result = re.search("(https://static.twitchcdn.net/config/settings.*?js)",
-                               main_page_request.data.decode('utf-8')).group(1)
+            if main_page_request.status != 200:
+                ...
+            # old domain static.twitchcdn.net
+            elif (l := re.search("(https://(?:static.twitchcdn.net|assets.twitch.tv)/config/settings.*?js)",
+                                main_page_request.data.decode('utf-8'))):
+                result = l.group(1)
+
             if not result:
                 logger.debug("Error with 'get_spade_url': no match 'settings_url'")
             return result
 
-        def get_spd_url(settings_url):
-            settings_request = TWITCH_POOL.request('GET', settings_url, headers=headers)
-            streamer.stream_spade_url = spade_url = re.search('"spade_url":"(.*?)"',
-                                                              settings_request.data.decode('utf-8')).group(1)
-            if not spade_url:
-                logger.debug("Error with 'get_spade_url': no match 'spade_url'")
+        def get_spd_url(settings_url: Optional[str]):
+            if settings_url:
+                settings_request = TWITCH_POOL.request('GET', settings_url, headers=headers)
+                if settings_request.status != 200:
+                    ...
+                elif l := re.search('"spade_url":"(.*?)"', settings_request.data.decode('utf-8')):
+                    streamer.stream_spade_url = spade_url = l.group(1)
+                    if not spade_url:
+                        logger.debug("Error with 'get_spade_url': no match 'spade_url'")
 
         try:
             get_spd_url(get_st_url())
@@ -150,9 +161,10 @@ class Twitch(object):
                 urllib3.exceptions.ConnectionError,
                 urllib3.exceptions.MaxRetryError,
                 urllib3.exceptions.ConnectTimeoutError,
-                urllib3.exceptions.ReadTimeoutError):
+                urllib3.exceptions.ReadTimeoutError) as e:
             # logger.error(f"No internet connection or server not responding")
-            self.check_connection_handler(6)
+            if self.check_connection_handler(6):
+                logger.error(f"Get spade url error {e}")
 
     # def get_broadcast_id(self, streamer):
     #     # json_data = copy.deepcopy(GQLOperations.WithIsStreamLiveQuery)
@@ -270,12 +282,14 @@ class Twitch(object):
             if not self._running:
                 break
 
-    def check_connection_handler(self, chunk_size):
+    def check_connection_handler(self, chunk_size) -> bool:
+        connection_stable = True
         # The success rate It's very hight usually. Why we have failed?
         # Check internet connection ...
         with self._internet_lock:
             logger.warning("Checking internet connection...")
             while not internet_connection_available():
+                connection_stable = False
                 random_sleep = 1  # random.randint(1, 3)
                 logger.warning(
                     f"No internet connection available! Retry after {random_sleep}m"
@@ -284,6 +298,8 @@ class Twitch(object):
             else:
                 logger.warning("Internet connection is good")
                 time.sleep(1)
+
+        return connection_stable
 
     """
     def post_gql_request(self, json_data):

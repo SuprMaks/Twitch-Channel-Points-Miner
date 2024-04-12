@@ -172,7 +172,7 @@ class WebSocketsPool:
 
     def unsubscribe(self, topic):
         for index, ws in enumerate(self.ws):
-            if ws.is_opened is False:
+            if not ws:
                 if topic in ws.pending_topics:
                     self.ws[index].pending_topics.remove(topic)
             else:
