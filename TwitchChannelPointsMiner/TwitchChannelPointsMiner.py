@@ -396,12 +396,11 @@ class TwitchChannelPointsMiner:
                                     streamer.settings.bet, Settings.streamer_settings.bet
                                 )
 
-                                query = TwitchGQLQuery(TwitchGQLQuerys.ReportMenuItem,
-                                                       {"channelLogin": streamer.username})\
-                                    (TwitchGQLQuerys.ChannelPointsContext,
-                                     {"channelLogin": streamer.username})\
-                                    (TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel,
-                                     {"channel": streamer.username})
+                                query = (TwitchGQLQuery(TwitchGQLQuerys.ReportMenuItem,
+                                                        {"channelLogin": streamer.username})
+                                         (TwitchGQLQuerys.ChannelPointsContext, {"channelLogin": streamer.username})
+                                         (TwitchGQLQuerys.VideoPlayerStreamInfoOverlayChannel,
+                                          {"channel": streamer.username}))
 
                                 if streamer.settings.claim_drops and int(streamer.channel_id):
                                     query(TwitchGQLQuerys.DropsHighlightService_AvailableDrops,

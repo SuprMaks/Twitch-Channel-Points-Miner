@@ -16,8 +16,8 @@ class GamesMngr(LockedDict, metaclass=Singleton):
         self.__call__(game)
 
     @dispatch
-    def __init__(self, mapping=(), **kwargs):
-        super().__init__(mapping, **kwargs)
+    def __init__(self):
+        super(GamesMngr, self).__init__()
 
     @dispatch
     def __iadd__(self, other: Game):
@@ -29,7 +29,7 @@ class GamesMngr(LockedDict, metaclass=Singleton):
         with self:
             if other.id not in self:
                 self[other.id] = other
-            elif other.name != (curr_game:=self[other.id]).name:
+            elif other.name != (curr_game := self[other.id]).name:
                 logger.error(f"Existing game {curr_game} with different name than new {other}")
         return self[other.id]
 
