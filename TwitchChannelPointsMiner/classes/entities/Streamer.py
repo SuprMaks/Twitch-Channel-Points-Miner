@@ -180,7 +180,7 @@ class Streamer(LockedObject):
         return self.stream.online
 
     def offline(self):
-        self.stream_spade_url = None
+        self.stream_spade_url = ''
 
     @property
     def online_at(self):
@@ -201,9 +201,9 @@ class Streamer(LockedObject):
     def stream_spade_url(self, url: Optional[str]):
         with self.stream:
             online = self.online
-            self.stream._spade_url = url
-            offline_at = self.stream.offline_at
-            if toggle := (bool(url) is not online):
+            or_url = self.stream.spade_url
+            self.stream._spade_url = '' if url is None else url
+            if toggle := (self.stream.online is not online):
                 if url:
                     self.stream.online_at = time.time()
                     self.stream.init_watch_streak()
@@ -212,7 +212,7 @@ class Streamer(LockedObject):
 
             # Upd for next condition till under lock
             online = self.online
-        if toggle or (not online and not offline_at):
+        if toggle or or_url is None:
             self.toggle_chat()
             logger.info(
                 f"{self} is {'Online' if online else 'Offline'}!",

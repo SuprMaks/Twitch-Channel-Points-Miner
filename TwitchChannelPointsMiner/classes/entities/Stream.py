@@ -71,7 +71,7 @@ class Stream(LockedObject):
 
     @id.setter
     def id(self, id: Optional[Union[int, str]]):
-        if id and (id:=int(id)):
+        if id and (id :=int(id)):
             self._id = id
         else:
             self._id = None
@@ -82,7 +82,7 @@ class Stream(LockedObject):
 
     @title.setter
     def title(self, title: Optional[str]):
-        if title and (title:=title.strip()):
+        if title and (title := title.strip()):
             self._title = title
         else:
             self._title = None
