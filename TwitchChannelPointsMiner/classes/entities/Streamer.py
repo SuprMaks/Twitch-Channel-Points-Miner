@@ -202,17 +202,18 @@ class Streamer(LockedObject):
         with self.stream:
             online = self.online
             self.stream._spade_url = url
-            if bool(url) is not online:
+            offline_at = self.stream.offline_at
+            if toggle := (bool(url) is not online):
                 if url:
                     self.stream.online_at = time.time()
                     self.stream.init_watch_streak()
                 else:
                     self.stream.offline_at = time.time()
 
-        if bool(url) is not online or not self.stream.online_at:
-            self.toggle_chat()
-
+            # Upd for next condition till under lock
             online = self.online
+        if toggle or (not online and not offline_at):
+            self.toggle_chat()
             logger.info(
                 f"{self} is {'Online' if online else 'Offline'}!",
                 extra={
@@ -400,13 +401,6 @@ class Streamer(LockedObject):
                 "channel": self.username,
                 "channel_id": self.channel_id,
                 "broadcast_id": self.stream.id,
-                # "player": "site",
-                # "user_id": self.twitch_login.get_user_id(),
-                # "live": True,
-
-                # 'game_id': str(self.stream.game.id),
-                # 'game': self.stream.game.name,
-
                 "url": self.streamer_url,
             }
 
