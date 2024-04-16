@@ -1,4 +1,3 @@
-import platform
 import re
 import socket
 import time
@@ -6,15 +5,14 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from os import path
 from random import randrange
-
-import requests
 from millify import millify
 
-from TwitchChannelPointsMiner.constants import USER_AGENTS, GITHUB_url
+from TwitchChannelPointsMiner.constants import USER_AGENTS, GITHUB_url, TWITCH_POOL
 
 
 def _millify(input, precision=2):
     return millify(input, precision)
+
 
 """
 def get_streamer_index(streamers: list, channel_id) -> int:
@@ -162,16 +160,20 @@ def create_chunks(lst, n):
 
 
 def download_file(name, fpath):
-    r = requests.get(
-        path.join(GITHUB_url, name),
-        headers={"User-Anget": get_user_agent("FIREFOX")},
-        stream=True,
-    )
-    if r.status_code == 200:
-        with open(fpath, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024):
-                if chunk:
-                    f.write(chunk)
+    try:
+        r = TWITCH_POOL.request(method='GET',
+                                url=path.join(GITHUB_url, name),
+                                headers={"User-Anget": get_user_agent("FIREFOX")},
+                                stream=True,
+                                preload_content=False)
+        if r.status == 200:
+            with open(fpath, "wb") as f:
+                for chunk in r.stream(amt=1024):
+                    if chunk:
+                        f.write(chunk)
+    finally:
+        if 'r' in locals() and r:
+            r.release_conn()
     return True
 
 
@@ -192,15 +194,13 @@ def check_versions():
     except Exception:
         current_version = "0.0.0"
     try:
-        r = requests.get(
-            "/".join(
-                [
-                    s.strip("/")
-                    for s in [GITHUB_url, "TwitchChannelPointsMiner", "__init__.py"]
-                ]
-            )
-        )
-        github_version = init2dict(r.text)
+        r = TWITCH_POOL.request(method='GET',
+                                url="/".join(
+                                    [
+                                        s.strip("/")
+                                        for s in [GITHUB_url, "TwitchChannelPointsMiner", "__init__.py"]
+                                    ]))
+        github_version = init2dict(r.data.decode('utf-8'))
         github_version = (
             github_version["version"] if "version" in github_version else "0.0.0"
         )
