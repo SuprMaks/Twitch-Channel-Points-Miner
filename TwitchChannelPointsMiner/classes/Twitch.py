@@ -426,12 +426,12 @@ class Twitch(object):
                         # Get the first 2 items, they are already in order
                         streamers_watching += streamers_online[:stream_watching_limit - length]
 
-                    elif prior in [Priority.POINTS_ASCENDING, Priority.POINTS_DESCEDING]:
+                    elif prior in [Priority.POINTS_ASCENDING, Priority.POINTS_DESCENDING]:
                         streamers_watching += sorted(
                             streamers_online,
                             key=lambda x: x['streamer'].channel_points,
                             reverse=(
-                                True if prior == Priority.POINTS_DESCEDING else False
+                                True if prior == Priority.POINTS_DESCENDING else False
                             ),
                         )[:stream_watching_limit - length]
 
