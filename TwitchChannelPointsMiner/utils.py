@@ -142,7 +142,7 @@ def set_default_settings(settings, defaults):
     return 0 if char == "A" else 1'''
 
 
-def internet_connection_available(host="8.8.8.8", port=53, timeout=3):
+def internet_connection_available(host="dns.google.com", port=53, timeout=3):
     try:
         socket.setdefaulttimeout(timeout)
         socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
