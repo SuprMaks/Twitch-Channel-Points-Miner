@@ -27,6 +27,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
 )
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
+from TwitchChannelPointsMiner.classes.entities.Game import Game
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.constants import (
     CLIENT_ID,
@@ -186,7 +187,8 @@ class Twitch(object):
             streamer.stream.update(
                 id=stream_info["stream"]["id"],
                 title=stream_info["broadcastSettings"]["title"],
-                game=GamesMngr()(stream_info["broadcastSettings"]["game"]),
+                game=GamesMngr()(stream_info["broadcastSettings"]["game"])
+                if stream_info["broadcastSettings"]["game"] else Game(),
                 tags=stream_info["stream"]["tags"],
                 viewers_count=stream_info["stream"]["viewersCount"],
             )

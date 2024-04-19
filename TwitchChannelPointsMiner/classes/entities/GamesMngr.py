@@ -16,8 +16,8 @@ class GamesMngr(LockedDict, metaclass=Singleton):
         self.__call__(game)
 
     @dispatch
-    def __init__(self):
-        super(GamesMngr, self).__init__()
+    def __init__(self, mapping=(), **kwargs):
+        super().__init__(mapping, **kwargs)
 
     @dispatch
     def __iadd__(self, other: Game):
